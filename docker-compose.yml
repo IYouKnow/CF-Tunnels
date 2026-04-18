@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    ports:
+      - "3000:3000"
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config
+      - cloudflared:/usr/local/bin/cloudflared
+    environment:
+      - CF_API_TOKEN=${CF_API_TOKEN}
+      - CF_ACCOUNT_ID=${CF_ACCOUNT_ID}
+      - ADMIN_USER=${ADMIN_USER:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-changeme}
+    env_file:
+      - .env
+    restart: unless-stopped
+    networks:
+      - cf-network
+
+volumes:
+  cloudflared:
+    driver: local
+
+networks:
+  cf-network:
+    driver: bridge

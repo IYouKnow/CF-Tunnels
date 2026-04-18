@@ -1,0 +1,59 @@
+# --- OS ---
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# --- Environment & secrets ---
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# --- Go ---
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+vendor/
+go.work
+go.work.sum
+/bin/
+
+# --- Node / Vue (Vite) ---
+frontend/node_modules/
+frontend/dist/
+backend/frontend/dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Vite
+frontend/.vite/
+
+# --- SQLite (runtime DB; paths match backend defaults) ---
+tunnels.db
+*.sqlite
+*.sqlite3
+
+# --- Logs & temp ---
+*.log
+logs/
+tmp/
+temp/
+.cache/
+
+# --- Local app config (copy from config.example.yaml) ---
+config/config.yaml
+
+# --- Docker (optional local overrides) ---
+docker-compose.override.yml
+
+# --- IDE (JetBrains) ---
+.idea/
