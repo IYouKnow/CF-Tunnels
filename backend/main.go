@@ -383,9 +383,60 @@ func getTunnel(c *gin.Context) {
 func deleteTunnel(c *gin.Context) {
 	id := c.Param("id")
 
+	var t struct {
+		UUID         string `json:"uuid"`
+		DNSRecordID string `json:"dns_record_id"`
+		ZoneID      string `json:"zone_id"`
+		AccountID  string `json:"account_id"`
+	}
+	err := db.QueryRow("SELECT COALESCE(uuid, ''), COALESCE(dns_record_id, ''), COALESCE(zone_id, ''), COALESCE(account_id, '') FROM tunnels WHERE id = ?", id).
+		Scan(&t.UUID, &t.DNSRecordID, &t.ZoneID, &t.AccountID)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Tunnel not found"})
+		return
+	}
+
 	stopTunnelProcess(id)
 
-	_, err := db.Exec("DELETE FROM tunnels WHERE id = ?", id)
+	if t.DNSRecordID != "" && t.ZoneID != "" && cfg.APIToken != "" {
+		log.Printf("[tunnel] Deleting DNS record %s from zone %s", t.DNSRecordID, t.ZoneID)
+		req, err := http.NewRequest("DELETE", "https://api.cloudflare.com/client/v4/zones/"+t.ZoneID+"/dns_records/"+t.DNSRecordID, nil)
+		if err == nil {
+			req.Header.Set("Authorization", "Bearer "+cfg.APIToken)
+			client := &http.Client{Timeout: 30 * time.Second}
+			resp, err := client.Do(req)
+			if err == nil {
+				resp.Body.Close()
+				log.Printf("[tunnel] DNS record deleted (HTTP %d)", resp.StatusCode)
+			}
+		}
+	}
+
+	if t.UUID != "" && cfg.APIToken != "" {
+		accID := t.AccountID
+		if accID == "" {
+			accID = cfg.AccountID
+		}
+		if accID == "" {
+			log.Printf("[tunnel] Cannot delete Cloudflare tunnel - no account_id stored and CF_ACCOUNT_ID not configured")
+		} else {
+			log.Printf("[tunnel] Deleting Cloudflare tunnel %s from account %s", t.UUID, accID)
+			req, err := http.NewRequest("DELETE", "https://api.cloudflare.com/client/v4/accounts/"+accID+"/cfd_tunnel/"+t.UUID, nil)
+			if err == nil {
+				req.Header.Set("Authorization", "Bearer "+cfg.APIToken)
+				req.Header.Set("Content-Type", "application/json")
+				client := &http.Client{Timeout: 30 * time.Second}
+				resp, err := client.Do(req)
+				if err == nil {
+					respBody, _ := io.ReadAll(resp.Body)
+					resp.Body.Close()
+					log.Printf("[tunnel] Cloudflare tunnel delete response: HTTP %d, body: %s", resp.StatusCode, string(respBody))
+				}
+			}
+		}
+	}
+
+	_, err = db.Exec("DELETE FROM tunnels WHERE id = ?", id)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
