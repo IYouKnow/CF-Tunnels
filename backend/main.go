@@ -3,8 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"database/sql"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,11 +31,12 @@ import (
 )
 
 type Config struct {
-	APIToken    string `mapstructure:"CF_API_TOKEN" env:"CF_API_TOKEN"`
-	AccountID   string `mapstructure:"CF_ACCOUNT_ID" env:"CF_ACCOUNT_ID"`
-	AdminUser   string `mapstructure:"ADMIN_USER" env:"ADMIN_USER"`
-	AdminPass   string `mapstructure:"ADMIN_PASSWORD" env:"ADMIN_PASSWORD"`
-	ListenPort  int    `mapstructure:"LISTEN_PORT" env:"LISTEN_PORT"`
+	APIToken       string `mapstructure:"CF_API_TOKEN" env:"CF_API_TOKEN"`
+	AccountID      string `mapstructure:"CF_ACCOUNT_ID" env:"CF_ACCOUNT_ID"`
+	AdminUser      string `mapstructure:"ADMIN_USER" env:"ADMIN_USER"`
+	AdminPass      string `mapstructure:"ADMIN_PASSWORD" env:"ADMIN_PASSWORD"`
+	ListenPort     int    `mapstructure:"LISTEN_PORT" env:"LISTEN_PORT"`
+	SessionSecret  string `mapstructure:"SESSION_SECRET" env:"SESSION_SECRET"`
 }
 
 type Tunnel struct {
@@ -70,6 +75,176 @@ var (
 	cfg        Config
 	tunnelProcs = sync.Map{}
 )
+
+const (
+	sessionCookieName = "cft_session"
+	sessionMaxAge     = 7 * 24 * 3600 // 7 days
+)
+
+type sessionPayload struct {
+	User string `json:"u"`
+	Exp  int64  `json:"exp"`
+}
+
+func (c *Config) sessionKey() []byte {
+	s := strings.TrimSpace(c.SessionSecret)
+	if s != "" {
+		return []byte(s)
+	}
+	sum := sha256.Sum256([]byte(c.AdminPass + "9cf-ui-session-v1"))
+	return sum[:]
+}
+
+func signSession(username string) (string, error) {
+	p := sessionPayload{
+		User: username,
+		Exp:  time.Now().Add(time.Duration(sessionMaxAge) * time.Second).Unix(),
+	}
+	raw, err := json.Marshal(p)
+	if err != nil {
+		return "", err
+	}
+	mac := hmac.New(sha256.New, cfg.sessionKey())
+	mac.Write(raw)
+	sig := mac.Sum(nil)
+	payloadB64 := base64.RawURLEncoding.EncodeToString(raw)
+	sigHex := hex.EncodeToString(sig)
+	return payloadB64 + "." + sigHex, nil
+}
+
+func verifySessionToken(token string) (string, bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 2 {
+		return "", false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return "", false
+	}
+	sig, err := hex.DecodeString(parts[1])
+	if err != nil || len(sig) != 32 {
+		return "", false
+	}
+	mac := hmac.New(sha256.New, cfg.sessionKey())
+	mac.Write(raw)
+	if !hmac.Equal(sig, mac.Sum(nil)) {
+		return "", false
+	}
+	var p sessionPayload
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "", false
+	}
+	if time.Now().Unix() > p.Exp {
+		return "", false
+	}
+	if p.User == "" {
+		return "", false
+	}
+	return p.User, true
+}
+
+func sessionUserFromRequest(c *gin.Context) (string, bool) {
+	cookie, err := c.Cookie(sessionCookieName)
+	if err != nil || cookie == "" {
+		return "", false
+	}
+	return verifySessionToken(cookie)
+}
+
+func setSessionCookie(c *gin.Context, token string) {
+	httpOnly := true
+	secure := c.Request.TLS != nil || strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https")
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    token,
+		Path:     "/",
+		MaxAge:   sessionMaxAge,
+		HttpOnly: httpOnly,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func clearSessionCookie(c *gin.Context) {
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func postLogin(c *gin.Context) {
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		return
+	}
+	if req.Username != cfg.AdminUser || req.Password != cfg.AdminPass {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid username or password"})
+		return
+	}
+	token, err := signSession(req.Username)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not create session"})
+		return
+	}
+	setSessionCookie(c, token)
+	c.JSON(http.StatusOK, gin.H{"username": req.Username})
+}
+
+func postLogout(c *gin.Context) {
+	clearSessionCookie(c)
+	c.JSON(http.StatusOK, gin.H{"message": "Logged out"})
+}
+
+func getAuthMe(c *gin.Context) {
+	u, exists := c.Get("user")
+	if !exists || u == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+	name, ok := u.(string)
+	if !ok || name == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"username": name})
+}
+
+func authMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		path := c.Request.URL.Path
+		if path == "/api/login" && c.Request.Method == http.MethodPost {
+			c.Next()
+			return
+		}
+		if path == "/api/logout" && c.Request.Method == http.MethodPost {
+			c.Next()
+			return
+		}
+
+		if user, ok := sessionUserFromRequest(c); ok && user == cfg.AdminUser {
+			c.Set("user", user)
+			c.Next()
+			return
+		}
+
+		authUser, authPass, hasAuth := c.Request.BasicAuth()
+		if hasAuth && authUser == cfg.AdminUser && authPass == cfg.AdminPass {
+			c.Set("user", cfg.AdminUser)
+			c.Next()
+			return
+		}
+
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Authorization required"})
+	}
+}
 
 func normalizeCFConfig(c *Config) {
 	c.APIToken = strings.TrimSpace(strings.Trim(c.APIToken, `"'`))
@@ -160,8 +335,13 @@ func main() {
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
+	r.Use(corsMiddleware())
 
 	r.Use(authMiddleware())
+
+	r.POST("/api/login", postLogin)
+	r.POST("/api/logout", postLogout)
+	r.GET("/api/auth/me", getAuthMe)
 
 	r.GET("/api/tunnels", listTunnels)
 	r.POST("/api/tunnels", createTunnel)
@@ -170,6 +350,7 @@ func main() {
 	r.POST("/api/tunnels/:id/start", startTunnel)
 	r.POST("/api/tunnels/:id/stop", stopTunnel)
 	r.GET("/api/tunnels/:id/logs", getTunnelLogs)
+	r.GET("/api/logs", getAllLogs)
 
 	r.GET("/api/ingress", listIngressRules)
 	r.POST("/api/ingress", createIngressRule)
@@ -182,6 +363,10 @@ func main() {
 	r.DELETE("/api/dns/:zoneId/:recordId", deleteDNSRecord)
 
 	r.NoRoute(func(c *gin.Context) {
+		if strings.HasPrefix(c.Request.URL.Path, "/api/") {
+			c.JSON(http.StatusNotFound, gin.H{"error": "API endpoint not found"})
+			return
+		}
 		c.File("./frontend/dist/index.html")
 	})
 
@@ -204,6 +389,24 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	srv.Shutdown(ctx)
+}
+
+func corsMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		origin := c.GetHeader("Origin")
+		if origin != "" {
+			c.Header("Access-Control-Allow-Origin", origin)
+			c.Header("Vary", "Origin")
+			c.Header("Access-Control-Allow-Credentials", "true")
+			c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		}
+		if c.Request.Method == http.MethodOptions {
+			c.AbortWithStatus(http.StatusNoContent)
+			return
+		}
+		c.Next()
+	}
 }
 
 func initDB() error {
@@ -263,24 +466,6 @@ func initDB() error {
 		_, _ = db.Exec("ALTER TABLE tunnels ADD COLUMN tunnel_token TEXT")
 	}
 	return nil
-}
-
-func authMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		authUser, authPass, hasAuth := c.Request.BasicAuth()
-		// log.Printf("Auth attempt - hasAuth: %v, user: %s, pass: %s, cfg.AdminUser: %s, cfg.AdminPass: %s", hasAuth, authUser, authPass, cfg.AdminUser, cfg.AdminPass)
-		if !hasAuth {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Authorization required"})
-			return
-		}
-
-		if authUser != cfg.AdminUser || authPass != cfg.AdminPass {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
-			return
-		}
-
-		c.Next()
-	}
 }
 
 func listTunnels(c *gin.Context) {
@@ -619,7 +804,26 @@ func getTunnelLogs(c *gin.Context) {
 	}
 	defer rows.Close()
 
-	var logs []LogEntry
+	logs := make([]LogEntry, 0)
+	for rows.Next() {
+		var l LogEntry
+		rows.Scan(&l.ID, &l.TunnelID, &l.Timestamp, &l.Level, &l.Message)
+		logs = append(logs, l)
+	}
+	c.JSON(http.StatusOK, logs)
+}
+
+func getAllLogs(c *gin.Context) {
+	limit := c.DefaultQuery("limit", "500")
+
+	rows, err := db.Query("SELECT id, tunnel_id, timestamp, level, message FROM logs ORDER BY timestamp DESC LIMIT ?", limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	logs := make([]LogEntry, 0)
 	for rows.Next() {
 		var l LogEntry
 		rows.Scan(&l.ID, &l.TunnelID, &l.Timestamp, &l.Level, &l.Message)
@@ -851,7 +1055,10 @@ func normalizeIngressHostname(h string) string {
 }
 
 func logTunnel(tunnelID interface{}, level, msg string) {
-	db.Exec("INSERT INTO logs (tunnel_id, level, message) VALUES (?, ?, ?)", tunnelID, level, msg)
+	_, err := db.Exec("INSERT INTO logs (tunnel_id, level, message, timestamp) VALUES (?, ?, ?, datetime('now'))", tunnelID, level, msg)
+	if err != nil {
+		log.Printf("[LOG ERROR] Failed to insert log: %v", err)
+	}
 }
 
 type logWriter struct {

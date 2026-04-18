@@ -21,7 +21,14 @@
     </div>
 
     <div class="card">
-      <div class="log-list" v-if="logs.length > 0">
+      <div v-if="loading" class="empty">
+        <p>Loading logs…</p>
+      </div>
+      <div v-else-if="loadError" class="empty error-state">
+        <p>{{ loadError }}</p>
+        <p class="hint">Sign out and sign in again, or open the app from the same URL as the API (Vite proxy or the Go server).</p>
+      </div>
+      <div class="log-list" v-else-if="logs.length">
         <div class="log-header">
           <div class="log-col-time">Time</div>
           <div class="log-col-tunnel">Tunnel</div>
@@ -38,7 +45,7 @@
         </div>
       </div>
       <div v-else class="empty">
-        <p>No logs found for the selected tunnel.</p>
+        <p>No logs found.</p>
       </div>
     </div>
   </div>
@@ -54,32 +61,40 @@ export default {
     const logs = ref([])
     const tunnels = ref([])
     const selectedTunnel = ref('')
+    const loading = ref(true)
+    const loadError = ref('')
     let refreshInterval = null
 
+    const normalizeLogList = (result) => {
+      if (result == null) return []
+      return Array.isArray(result) ? result : []
+    }
+
     const getTunnelName = (id) => {
+      if (id == null || id === '') return '-'
       if (!Array.isArray(tunnels.value)) return 'Unknown'
-      const t = tunnels.value.find(t => t.id === id)
+      const n = Number(id)
+      const t = tunnels.value.find(t => t.id === id || t.id === n)
       return t ? t.name : 'Unknown'
     }
 
     const loadLogs = async () => {
+      loadError.value = ''
       try {
-        if (!Array.isArray(tunnels.value)) {
-          logs.value = []
-          return
-        }
         if (selectedTunnel.value) {
-          logs.value = await api.getTunnelLogs(selectedTunnel.value)
+          const result = await api.getTunnelLogs(selectedTunnel.value)
+          logs.value = normalizeLogList(result)
         } else {
-          logs.value = []
-          for (const t of tunnels.value) {
-            const tunnelLogs = await api.getTunnelLogs(t.id)
-            logs.value.push(...tunnelLogs)
-          }
-          logs.value.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+          const result = await api.getAllLogs()
+          logs.value = normalizeLogList(result)
         }
       } catch (e) {
         console.error(e)
+        const msg = e.response?.data?.error || e.message || 'Failed to load logs'
+        loadError.value = typeof msg === 'string' ? msg : 'Failed to load logs'
+        logs.value = []
+      } finally {
+        loading.value = false
       }
     }
 
@@ -92,7 +107,9 @@ export default {
     }
 
     const formatTime = (timestamp) => {
+      if (!timestamp) return '-'
       const date = new Date(timestamp)
+      if (isNaN(date.getTime())) return '-'
       return date.toLocaleString()
     }
 
@@ -108,7 +125,7 @@ export default {
       }
     })
 
-    return { logs, tunnels, selectedTunnel, loadLogs, getTunnelName, formatTime }
+    return { logs, tunnels, selectedTunnel, loadLogs, getTunnelName, formatTime, loading, loadError }
   }
 }
 </script>
@@ -235,6 +252,16 @@ export default {
 .empty {
   padding: 3rem;
   text-align: center;
+  color: var(--text-secondary);
+}
+
+.empty.error-state {
+  color: var(--error);
+}
+
+.empty .hint {
+  margin-top: 0.75rem;
+  font-size: 0.85rem;
   color: var(--text-secondary);
 }
 
