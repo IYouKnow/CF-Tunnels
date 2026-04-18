@@ -15,6 +15,7 @@
       <div class="table-header">
         <div class="col-name">Name</div>
         <div class="col-domain">Domain</div>
+        <div class="col-address">Address</div>
         <div class="col-uuid">UUID</div>
         <div class="col-status">Status</div>
         <div class="col-actions">Actions</div>
@@ -27,6 +28,10 @@
           <span v-if="getDomainName(tunnel.zone_id)" class="domain-badge">
             {{ tunnel.subdomain }}.{{ getDomainName(tunnel.zone_id) }}
           </span>
+          <span v-else class="no-domain">-</span>
+        </div>
+        <div class="col-address">
+          <code v-if="tunnel.address">{{ tunnel.address }}</code>
           <span v-else class="no-domain">-</span>
         </div>
         <div class="col-uuid">
@@ -71,6 +76,11 @@
             <input v-model="newTunnel.subdomain" type="text" placeholder="myapp" />
             <small v-if="newTunnel.zone_id">Will create: {{ newTunnel.subdomain || 'subdomain' }}.{{ selectedDomainName }}</small>
           </div>
+          <div class="form-group">
+            <label>Destination Address (optional)</label>
+            <input v-model="newTunnel.address" type="text" placeholder="http://localhost:3000" />
+            <small>The target service to tunnel to (e.g., http://localhost:3000, tcp://localhost:22)</small>
+          </div>
           <div class="modal-actions">
             <button type="button" class="btn-secondary" @click="showCreateModal = false">Cancel</button>
             <button type="submit" class="btn-primary">Create Tunnel</button>
@@ -91,7 +101,7 @@ export default {
     const tunnels = ref([])
     const domains = ref([])
     const showCreateModal = ref(false)
-    const newTunnel = ref({ name: '', account_id: '', zone_id: '', subdomain: '' })
+    const newTunnel = ref({ name: '', account_id: '', zone_id: '', subdomain: '', address: '' })
     const currentPage = ref(1)
     const perPage = ref(20)
     const totalTunnels = ref(0)
@@ -154,10 +164,13 @@ export default {
         name: newTunnel.value.name,
         account_id: newTunnel.value.account_id,
         zone_id: newTunnel.value.zone_id,
-        subdomain: newTunnel.value.subdomain
+        // Apex hostname for the zone (e.g. example.com); required for correct DNS CNAME on start.
+        domain: selectedDomainName.value,
+        subdomain: newTunnel.value.subdomain,
+        address: newTunnel.value.address
       })
       showCreateModal.value = false
-      newTunnel.value = { name: '', account_id: '', zone_id: '', subdomain: '' }
+      newTunnel.value = { name: '', account_id: '', zone_id: '', subdomain: '', address: '' }
       loadTunnels()
     }
 
@@ -252,7 +265,7 @@ export default {
 
 .table-header {
   display: grid;
-  grid-template-columns: 1.5fr 2fr 2fr 100px 140px;
+  grid-template-columns: 1.5fr 1.5fr 1.5fr 2fr 100px 140px;
   gap: 1rem;
   padding: 1rem 1.25rem;
   background: var(--bg-tertiary);
@@ -263,7 +276,7 @@ export default {
 
 .table-row {
   display: grid;
-  grid-template-columns: 1.5fr 2fr 2fr 100px 140px;
+  grid-template-columns: 1.5fr 1.5fr 1.5fr 2fr 100px 140px;
   gap: 1rem;
   padding: 1rem 1.25rem;
   align-items: center;
@@ -305,6 +318,14 @@ export default {
 
 .no-domain {
   color: var(--text-secondary);
+}
+
+.col-address code {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
 }
 
 .col-actions {
@@ -358,7 +379,8 @@ export default {
   .table-row {
     grid-template-columns: 1fr 1fr 80px 120px;
   }
-  .col-uuid {
+  .col-uuid,
+  .col-address {
     display: none;
   }
 }
