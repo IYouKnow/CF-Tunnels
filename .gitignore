@@ -57,3 +57,4 @@ docker-compose.override.yml
 
 # --- IDE (JetBrains) ---
 .idea/
+backend/tunnels.db-journal

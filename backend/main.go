@@ -333,8 +333,12 @@ func main() {
 	}
 	defer db.Close()
 
+	// Quiet stdout: tunnel/DNS helpers use log.Printf; UI still has /api/logs in SQLite.
+	log.SetOutput(io.Discard)
+
 	gin.SetMode(gin.ReleaseMode)
-	r := gin.Default()
+	r := gin.New()
+	r.Use(gin.Recovery())
 	r.Use(corsMiddleware())
 
 	r.Use(authMiddleware())
@@ -377,7 +381,8 @@ func main() {
 
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Server error: %v", err)
+			fmt.Fprintf(os.Stderr, "Server error: %v\n", err)
+			os.Exit(1)
 		}
 	}()
 
@@ -385,7 +390,6 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("Shutting down...")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	srv.Shutdown(ctx)
@@ -569,13 +573,15 @@ func deleteTunnel(c *gin.Context) {
 	id := c.Param("id")
 
 	var t struct {
-		UUID         string `json:"uuid"`
+		UUID        string `json:"uuid"`
 		DNSRecordID string `json:"dns_record_id"`
 		ZoneID      string `json:"zone_id"`
-		AccountID  string `json:"account_id"`
+		AccountID   string `json:"account_id"`
+		Subdomain   string `json:"subdomain"`
+		Domain      string `json:"domain"`
 	}
-	err := db.QueryRow("SELECT COALESCE(uuid, ''), COALESCE(dns_record_id, ''), COALESCE(zone_id, ''), COALESCE(account_id, '') FROM tunnels WHERE id = ?", id).
-		Scan(&t.UUID, &t.DNSRecordID, &t.ZoneID, &t.AccountID)
+	err := db.QueryRow("SELECT COALESCE(uuid, ''), COALESCE(dns_record_id, ''), COALESCE(zone_id, ''), COALESCE(account_id, ''), COALESCE(subdomain, ''), COALESCE(domain, '') FROM tunnels WHERE id = ?", id).
+		Scan(&t.UUID, &t.DNSRecordID, &t.ZoneID, &t.AccountID, &t.Subdomain, &t.Domain)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Tunnel not found"})
 		return
@@ -583,16 +589,23 @@ func deleteTunnel(c *gin.Context) {
 
 	stopTunnelProcess(id)
 
-	if t.DNSRecordID != "" && t.ZoneID != "" && cfg.APIToken != "" {
-		log.Printf("[tunnel] Deleting DNS record %s from zone %s", t.DNSRecordID, t.ZoneID)
-		req, err := http.NewRequest("DELETE", "https://api.cloudflare.com/client/v4/zones/"+t.ZoneID+"/dns_records/"+t.DNSRecordID, nil)
-		if err == nil {
-			req.Header.Set("Authorization", "Bearer "+cfg.APIToken)
-			client := &http.Client{Timeout: 30 * time.Second}
-			resp, err := client.Do(req)
-			if err == nil {
-				resp.Body.Close()
-				log.Printf("[tunnel] DNS record deleted (HTTP %d)", resp.StatusCode)
+	var warnings []string
+
+	// DNS cleanup: prefer stored record ID, then fallback to lookup by name.
+	if t.ZoneID != "" && cfg.APIToken != "" {
+		recordID := strings.TrimSpace(t.DNSRecordID)
+		if recordID == "" && strings.TrimSpace(t.Subdomain) != "" && strings.TrimSpace(t.Domain) != "" {
+			fqdn := strings.TrimSpace(t.Subdomain) + "." + strings.TrimSpace(t.Domain)
+			lookedUpID, lookErr := findCNAMERecordID(t.ZoneID, fqdn)
+			if lookErr != nil {
+				warnings = append(warnings, "DNS lookup before delete failed: "+lookErr.Error())
+			}
+			recordID = lookedUpID
+		}
+		if recordID != "" {
+			log.Printf("[tunnel] Deleting DNS record %s from zone %s", recordID, t.ZoneID)
+			if err := deleteDNSRecordByID(t.ZoneID, recordID); err != nil {
+				warnings = append(warnings, "DNS delete failed: "+err.Error())
 			}
 		}
 	}
@@ -606,17 +619,8 @@ func deleteTunnel(c *gin.Context) {
 			log.Printf("[tunnel] Cannot delete Cloudflare tunnel - no account_id stored and CF_ACCOUNT_ID not configured")
 		} else {
 			log.Printf("[tunnel] Deleting Cloudflare tunnel %s from account %s", t.UUID, accID)
-			req, err := http.NewRequest("DELETE", "https://api.cloudflare.com/client/v4/accounts/"+accID+"/cfd_tunnel/"+t.UUID, nil)
-			if err == nil {
-				req.Header.Set("Authorization", "Bearer "+cfg.APIToken)
-				req.Header.Set("Content-Type", "application/json")
-				client := &http.Client{Timeout: 30 * time.Second}
-				resp, err := client.Do(req)
-				if err == nil {
-					respBody, _ := io.ReadAll(resp.Body)
-					resp.Body.Close()
-					log.Printf("[tunnel] Cloudflare tunnel delete response: HTTP %d, body: %s", resp.StatusCode, string(respBody))
-				}
+			if err := deleteRemoteTunnelWithRetry(accID, t.UUID); err != nil {
+				warnings = append(warnings, "Cloudflare tunnel delete failed: "+err.Error())
 			}
 		}
 	}
@@ -626,7 +630,143 @@ func deleteTunnel(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "Tunnel deleted"})
+	msg := "Tunnel deleted"
+	if len(warnings) > 0 {
+		msg = msg + " (with warnings)"
+	}
+	c.JSON(http.StatusOK, gin.H{"message": msg, "warnings": warnings})
+}
+
+func findCNAMERecordID(zoneID, fqdn string) (string, error) {
+	if zoneID == "" || fqdn == "" || cfg.APIToken == "" {
+		return "", nil
+	}
+	reqURL := fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/dns_records?type=CNAME&name=%s", zoneID, url.QueryEscape(fqdn))
+	req, err := http.NewRequest("GET", reqURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.APIToken)
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var out struct {
+		Success bool `json:"success"`
+		Result  []struct {
+			ID string `json:"id"`
+		} `json:"result"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return "", fmt.Errorf("parse dns lookup response: %w", err)
+	}
+	if !out.Success {
+		msg := string(body)
+		if len(out.Errors) > 0 && strings.TrimSpace(out.Errors[0].Message) != "" {
+			msg = out.Errors[0].Message
+		}
+		return "", fmt.Errorf(strings.TrimSpace(msg))
+	}
+	if len(out.Result) == 0 {
+		return "", nil
+	}
+	return out.Result[0].ID, nil
+}
+
+func deleteDNSRecordByID(zoneID, recordID string) error {
+	req, err := http.NewRequest("DELETE", "https://api.cloudflare.com/client/v4/zones/"+zoneID+"/dns_records/"+recordID, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.APIToken)
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var out struct {
+		Success bool `json:"success"`
+		Errors  []struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return fmt.Errorf("parse dns delete response: %w", err)
+	}
+	if !out.Success {
+		msg := string(body)
+		if len(out.Errors) > 0 && strings.TrimSpace(out.Errors[0].Message) != "" {
+			msg = out.Errors[0].Message
+		}
+		return fmt.Errorf(strings.TrimSpace(msg))
+	}
+	log.Printf("[tunnel] DNS record deleted (HTTP %d)", resp.StatusCode)
+	return nil
+}
+
+func deleteRemoteTunnelWithRetry(accountID, tunnelID string) error {
+	var lastErr error
+	for attempt := 1; attempt <= 5; attempt++ {
+		req, err := http.NewRequest("DELETE", "https://api.cloudflare.com/client/v4/accounts/"+accountID+"/cfd_tunnel/"+tunnelID, nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+cfg.APIToken)
+		req.Header.Set("Content-Type", "application/json")
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+		} else {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			log.Printf("[tunnel] Cloudflare tunnel delete response (attempt %d): HTTP %d, body: %s", attempt, resp.StatusCode, string(body))
+
+			var out struct {
+				Success bool `json:"success"`
+				Errors  []struct {
+					Code    int    `json:"code"`
+					Message string `json:"message"`
+				} `json:"errors"`
+			}
+			if err := json.Unmarshal(body, &out); err != nil {
+				lastErr = fmt.Errorf("parse tunnel delete response: %w", err)
+			} else if out.Success {
+				return nil
+			} else {
+				msg := string(body)
+				code := 0
+				if len(out.Errors) > 0 {
+					code = out.Errors[0].Code
+					if strings.TrimSpace(out.Errors[0].Message) != "" {
+						msg = out.Errors[0].Message
+					}
+				}
+				lastErr = fmt.Errorf(strings.TrimSpace(msg))
+				// 1022 = active tunnel connections still present; retry after short backoff.
+				if code == 1022 && attempt < 5 {
+					time.Sleep(time.Duration(attempt) * time.Second)
+					continue
+				}
+				return lastErr
+			}
+		}
+		if attempt < 5 {
+			time.Sleep(time.Duration(attempt) * time.Second)
+		}
+	}
+	return lastErr
 }
 
 func startTunnel(c *gin.Context) {
