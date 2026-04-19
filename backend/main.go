@@ -324,6 +324,29 @@ func main() {
 	viper.Unmarshal(&cfg)
 	normalizeCFConfig(&cfg)
 
+	// Prefer OS env (Docker/CasaOS): viper.Unmarshal often does not bind env into the struct.
+	if v := strings.TrimSpace(os.Getenv("CF_API_TOKEN")); v != "" {
+		cfg.APIToken = v
+	}
+	if v := strings.TrimSpace(os.Getenv("CF_ACCOUNT_ID")); v != "" {
+		cfg.AccountID = v
+	}
+	if v := strings.TrimSpace(os.Getenv("ADMIN_USER")); v != "" {
+		cfg.AdminUser = v
+	}
+	if v := strings.TrimSpace(os.Getenv("ADMIN_PASSWORD")); v != "" {
+		cfg.AdminPass = v
+	}
+	if v := strings.TrimSpace(os.Getenv("SESSION_SECRET")); v != "" {
+		cfg.SessionSecret = v
+	}
+	if v := strings.TrimSpace(os.Getenv("LISTEN_PORT")); v != "" {
+		if p, err := strconv.Atoi(v); err == nil && p > 0 {
+			cfg.ListenPort = p
+		}
+	}
+	normalizeCFConfig(&cfg)
+
 	if cfg.AdminUser == "" {
 		cfg.AdminUser = "admin"
 	}
