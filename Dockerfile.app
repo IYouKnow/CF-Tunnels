@@ -20,9 +20,17 @@ RUN npm install && npm run build
 WORKDIR /build/backend
 RUN go build -o /app/backend main.go
 
-FROM alpine:3.19
+FROM alpine:3.21
 
-RUN apk add --no-cache ca-certificates cloudflared
+# cloudflared is not packaged in Alpine apk; use official release (matches common local installs).
+ARG TARGETARCH
+ARG CLOUDFLARED_VERSION=2026.3.0
+RUN apk add --no-cache ca-certificates curl \
+	&& curl -fsSL \
+		"https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${TARGETARCH}" \
+		-o /usr/local/bin/cloudflared \
+	&& chmod +x /usr/local/bin/cloudflared \
+	&& cloudflared --version
 
 WORKDIR /app
 
