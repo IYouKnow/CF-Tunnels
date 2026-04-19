@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -220,6 +221,11 @@ func getAuthMe(c *gin.Context) {
 func authMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		path := c.Request.URL.Path
+		// SPA (HTML + /assets) must load before login; client-side routes (/login, …) need GET without session.
+		if c.Request.Method == http.MethodGet && !strings.HasPrefix(path, "/api/") {
+			c.Next()
+			return
+		}
 		if path == "/api/login" && c.Request.Method == http.MethodPost {
 			c.Next()
 			return
@@ -365,6 +371,11 @@ func main() {
 	r.GET("/api/domains", listDomains)
 	r.POST("/api/dns", createDNSRecord)
 	r.DELETE("/api/dns/:zoneId/:recordId", deleteDNSRecord)
+
+	r.Static("/assets", "./frontend/dist/assets")
+	r.GET("/", func(c *gin.Context) {
+		c.File("./frontend/dist/index.html")
+	})
 
 	r.NoRoute(func(c *gin.Context) {
 		if strings.HasPrefix(c.Request.URL.Path, "/api/") {
@@ -868,10 +879,13 @@ func startTunnel(c *gin.Context) {
 	}
 
 	exeDir, _ := filepath.Abs(".")
-	cloudflaredPath := filepath.Join(exeDir, "cloudflared.exe")
-
+	binName := "cloudflared"
+	if runtime.GOOS == "windows" {
+		binName = "cloudflared.exe"
+	}
+	cloudflaredPath := filepath.Join(exeDir, binName)
 	if _, err := os.Stat(cloudflaredPath); err != nil {
-		cloudflaredPath = "cloudflared.exe"
+		cloudflaredPath = binName
 		exeDir = "."
 	}
 
