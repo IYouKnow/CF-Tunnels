@@ -38,6 +38,10 @@ type Config struct {
 	AdminPass      string `mapstructure:"ADMIN_PASSWORD" env:"ADMIN_PASSWORD"`
 	ListenPort     int    `mapstructure:"LISTEN_PORT" env:"LISTEN_PORT"`
 	SessionSecret  string `mapstructure:"SESSION_SECRET" env:"SESSION_SECRET"`
+	// DataDir holds tunnels.db (mount a host volume here in Docker, e.g. /app/data).
+	DataDir string `mapstructure:"DATA_DIR" env:"DATA_DIR"`
+	// WebRoot is the Vite build output directory (Docker: /app/share/web; dev: ./frontend/dist).
+	WebRoot string `mapstructure:"WEB_ROOT" env:"WEB_ROOT"`
 }
 
 type Tunnel struct {
@@ -257,6 +261,21 @@ func normalizeCFConfig(c *Config) {
 	c.AccountID = strings.TrimSpace(strings.Trim(c.AccountID, `"'`))
 }
 
+// defaultWebRootDir picks the Vite out dir for local runs (repo root vs backend/ cwd).
+func defaultWebRootDir() string {
+	candidates := []string{
+		filepath.Join("frontend", "dist"),
+		filepath.Join("..", "frontend", "dist"),
+	}
+	for _, p := range candidates {
+		st, err := os.Stat(filepath.Join(p, "index.html"))
+		if err == nil && !st.IsDir() {
+			return p
+		}
+	}
+	return filepath.Join("..", "frontend", "dist")
+}
+
 func cfRequest(method, url string, body io.Reader) (*http.Response, error) {
 	req, err := http.NewRequest(method, url, body)
 	if err != nil {
@@ -345,6 +364,12 @@ func main() {
 			cfg.ListenPort = p
 		}
 	}
+	if v := strings.TrimSpace(os.Getenv("DATA_DIR")); v != "" {
+		cfg.DataDir = v
+	}
+	if v := strings.TrimSpace(os.Getenv("WEB_ROOT")); v != "" {
+		cfg.WebRoot = v
+	}
 	normalizeCFConfig(&cfg)
 
 	if cfg.AdminUser == "" {
@@ -355,6 +380,12 @@ func main() {
 	}
 	if cfg.ListenPort == 0 {
 		cfg.ListenPort = 3000
+	}
+	if strings.TrimSpace(cfg.DataDir) == "" {
+		cfg.DataDir = "."
+	}
+	if strings.TrimSpace(cfg.WebRoot) == "" {
+		cfg.WebRoot = defaultWebRootDir()
 	}
 
 	if err := initDB(); err != nil {
@@ -395,9 +426,12 @@ func main() {
 	r.POST("/api/dns", createDNSRecord)
 	r.DELETE("/api/dns/:zoneId/:recordId", deleteDNSRecord)
 
-	r.Static("/assets", "./frontend/dist/assets")
+	webRoot := filepath.Clean(cfg.WebRoot)
+	assetsFS := filepath.Join(webRoot, "assets")
+	indexHTML := filepath.Join(webRoot, "index.html")
+	r.Static("/assets", assetsFS)
 	r.GET("/", func(c *gin.Context) {
-		c.File("./frontend/dist/index.html")
+		c.File(indexHTML)
 	})
 
 	r.NoRoute(func(c *gin.Context) {
@@ -405,7 +439,7 @@ func main() {
 			c.JSON(http.StatusNotFound, gin.H{"error": "API endpoint not found"})
 			return
 		}
-		c.File("./frontend/dist/index.html")
+		c.File(indexHTML)
 	})
 
 	srv := &http.Server{
@@ -448,8 +482,22 @@ func corsMiddleware() gin.HandlerFunc {
 }
 
 func initDB() error {
-	dbPath := "tunnels.db"
-	os.MkdirAll(filepath.Dir(dbPath), 0755)
+	dir := filepath.Clean(cfg.DataDir)
+	dbPath := filepath.Join(dir, "tunnels.db")
+
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+
+	// One-time move from legacy cwd ./tunnels.db (e.g. old Docker layout /app/tunnels.db).
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) && dir != "." {
+		legacy := filepath.Join(".", "tunnels.db")
+		if st, err := os.Stat(legacy); err == nil && !st.IsDir() {
+			if err := os.Rename(legacy, dbPath); err != nil {
+				return fmt.Errorf("migrate legacy tunnels.db: %w", err)
+			}
+		}
+	}
 
 	var err error
 	db, err = sql.Open("sqlite", dbPath+"?cache=shared")
