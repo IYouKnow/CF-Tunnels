@@ -4,6 +4,7 @@ import Dashboard from './views/Dashboard.vue'
 import Tunnels from './views/Tunnels.vue'
 import DNS from './views/DNS.vue'
 import Logs from './views/Logs.vue'
+import Apps from './views/Apps.vue'
 import Login from './views/Login.vue'
 import { refreshAuth } from './auth'
 
@@ -22,7 +23,8 @@ const routes = [
       { path: '', name: 'Dashboard', component: Dashboard },
       { path: 'tunnels', name: 'Tunnels', component: Tunnels },
       { path: 'dns', name: 'DNS', component: DNS },
-      { path: 'logs', name: 'Logs', component: Logs }
+      { path: 'logs', name: 'Logs', component: Logs },
+      { path: 'apps', name: 'Apps', component: Apps }
     ]
   }
 ]

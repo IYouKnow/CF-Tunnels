@@ -1,3 +1,6 @@
+//go:build dbtools
+// +build dbtools
+
 package main
 
 import (
@@ -9,18 +12,18 @@ import (
 
 func main() {
 	dbs := []string{"tunnels.db", "../tunnels.db"}
-	
+
 	for _, dbPath := range dbs {
 		db, err := sql.Open("sqlite", dbPath+"?cache=shared")
 		if err != nil {
 			continue
 		}
-		
+
 		// Drop and recreate tables
 		db.Exec("DROP TABLE IF EXISTS tunnels")
 		db.Exec("DROP TABLE IF EXISTS logs")
 		db.Exec("DROP TABLE IF EXISTS ingress_rules")
-		
+
 		db.Exec(`
 			CREATE TABLE tunnels (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,7 +56,7 @@ func main() {
 				FOREIGN KEY(tunnel_id) REFERENCES tunnels(id) ON DELETE CASCADE
 			);
 		`)
-		
+
 		fmt.Printf("Reset: %s\n", dbPath)
 		db.Close()
 	}

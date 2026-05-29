@@ -1,43 +1,42 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
-	"database/sql"
-	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/cf-tunnel-manager/backend/internal/apps"
+	"github.com/cf-tunnel-manager/backend/internal/cloudflare"
+	"github.com/cf-tunnel-manager/backend/internal/tunnels"
 	"github.com/gin-gonic/gin"
 	_ "github.com/glebarez/sqlite"
 	"github.com/spf13/viper"
 )
 
 type Config struct {
-	APIToken       string `mapstructure:"CF_API_TOKEN" env:"CF_API_TOKEN"`
-	AccountID      string `mapstructure:"CF_ACCOUNT_ID" env:"CF_ACCOUNT_ID"`
-	AdminUser      string `mapstructure:"ADMIN_USER" env:"ADMIN_USER"`
-	AdminPass      string `mapstructure:"ADMIN_PASSWORD" env:"ADMIN_PASSWORD"`
-	ListenPort     int    `mapstructure:"LISTEN_PORT" env:"LISTEN_PORT"`
-	SessionSecret  string `mapstructure:"SESSION_SECRET" env:"SESSION_SECRET"`
+	APIToken      string `mapstructure:"CF_API_TOKEN" env:"CF_API_TOKEN"`
+	AccountID     string `mapstructure:"CF_ACCOUNT_ID" env:"CF_ACCOUNT_ID"`
+	AdminUser     string `mapstructure:"ADMIN_USER" env:"ADMIN_USER"`
+	AdminPass     string `mapstructure:"ADMIN_PASSWORD" env:"ADMIN_PASSWORD"`
+	ListenPort    int    `mapstructure:"LISTEN_PORT" env:"LISTEN_PORT"`
+	SessionSecret string `mapstructure:"SESSION_SECRET" env:"SESSION_SECRET"`
 	// DataDir holds tunnels.db (mount a host volume here in Docker, e.g. /app/data).
 	DataDir string `mapstructure:"DATA_DIR" env:"DATA_DIR"`
 	// WebRoot is the Vite build output directory (Docker: /app/share/web; dev: ./frontend/dist).
@@ -45,24 +44,24 @@ type Config struct {
 }
 
 type Tunnel struct {
-	ID          int       `json:"id"`
-	Name        string    `json:"name"`
-	UUID        string    `json:"uuid"`
-	AccountID   string    `json:"account_id"`
-	ZoneID      string    `json:"zone_id,omitempty"`
-	Subdomain   string    `json:"subdomain,omitempty"`
-	Domain      string    `json:"domain,omitempty"`
-	Address    string    `json:"address,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	Status      string    `json:"status"`
-	PID         int       `json:"pid,omitempty"`
+	ID        int       `json:"id"`
+	Name      string    `json:"name"`
+	UUID      string    `json:"uuid"`
+	AccountID string    `json:"account_id"`
+	ZoneID    string    `json:"zone_id,omitempty"`
+	Subdomain string    `json:"subdomain,omitempty"`
+	Domain    string    `json:"domain,omitempty"`
+	Address   string    `json:"address,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	Status    string    `json:"status"`
+	PID       int       `json:"pid,omitempty"`
 }
 
 type IngressRule struct {
-	ID        int    `json:"id"`
-	TunnelID  int    `json:"tunnel_id"`
+	ID       int    `json:"id"`
+	TunnelID int    `json:"tunnel_id"`
 	Hostname string `json:"hostname"`
-	Path      string `json:"path,omitempty"`
+	Path     string `json:"path,omitempty"`
 	Service  string `json:"service"`
 	Protocol string `json:"protocol,omitempty"`
 }
@@ -76,8 +75,11 @@ type LogEntry struct {
 }
 
 var (
-	db         *sql.DB
-	cfg        Config
+	db          *sql.DB
+	cfg         Config
+	appSvc      *apps.Service
+	cfClient    *cloudflare.Client
+	tunnelSvc   *tunnels.Service
 	tunnelProcs = sync.Map{}
 )
 
@@ -256,9 +258,67 @@ func authMiddleware() gin.HandlerFunc {
 	}
 }
 
+func appTokenAuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		authHeader := strings.TrimSpace(c.GetHeader("Authorization"))
+		if !strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Bearer token required"})
+			return
+		}
+		token := strings.TrimSpace(authHeader[len("Bearer "):])
+		authenticated, err := appSvc.AuthenticateToken(c.Request.Context(), token)
+		if err != nil {
+			switch {
+			case errors.Is(err, apps.ErrMissingToken), errors.Is(err, apps.ErrTokenInvalid):
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid app token"})
+			case errors.Is(err, apps.ErrTokenExpired):
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "App token expired"})
+			case errors.Is(err, apps.ErrTokenRevoked):
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "App token revoked"})
+			default:
+				c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Could not authenticate app token"})
+			}
+			return
+		}
+		c.Set("app", authenticated.App)
+		c.Set("app_scopes", authenticated.Token.Scopes)
+		c.Next()
+	}
+}
+
+func requireAppScope(required string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		raw, exists := c.Get("app_scopes")
+		if !exists {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Missing app scopes"})
+			return
+		}
+		scopes, ok := raw.([]string)
+		if !ok {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Invalid app scopes"})
+			return
+		}
+		if err := apps.RequireScope(scopes, required); err != nil {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		c.Next()
+	}
+}
+
 func normalizeCFConfig(c *Config) {
 	c.APIToken = strings.TrimSpace(strings.Trim(c.APIToken, `"'`))
 	c.AccountID = strings.TrimSpace(strings.Trim(c.AccountID, `"'`))
+}
+
+func validateAccountIDForTunnelAPI(accountID string) string {
+	if cfClient == nil {
+		return ""
+	}
+	if err := cfClient.ValidateAccountID(context.Background(), accountID); err != nil {
+		return " " + err.Error()
+	}
+	return ""
 }
 
 // defaultWebRootDir picks the Vite out dir for local runs (repo root vs backend/ cwd).
@@ -274,64 +334,6 @@ func defaultWebRootDir() string {
 		}
 	}
 	return filepath.Join("..", "frontend", "dist")
-}
-
-func cfRequest(method, url string, body io.Reader) (*http.Response, error) {
-	req, err := http.NewRequest(method, url, body)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+cfg.APIToken)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	return (&http.Client{Timeout: 60 * time.Second}).Do(req)
-}
-
-// validateAccountIDForTunnelAPI checks that CF_ACCOUNT_ID is one of the accounts this token may use.
-// Zone-only tokens (DNS only) often cannot create tunnels — listing accounts fails or omits the ID.
-func validateAccountIDForTunnelAPI(accountID string) string {
-	if accountID == "" || cfg.APIToken == "" {
-		return ""
-	}
-	resp, err := cfRequest("GET", "https://api.cloudflare.com/client/v4/accounts?per_page=50", nil)
-	if err != nil {
-		return fmt.Sprintf(" Could not list Cloudflare accounts: %v.", err)
-	}
-	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
-	var out struct {
-		Success bool `json:"success"`
-		Result  []struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
-		} `json:"result"`
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
-	}
-	_ = json.Unmarshal(b, &out)
-	if resp.StatusCode >= 400 || !out.Success {
-		msg := ""
-		if len(out.Errors) > 0 {
-			msg = out.Errors[0].Message
-		}
-		return fmt.Sprintf(" Token cannot list accounts (HTTP %d). Add permission: Account → Account Settings → Read, or widen Account resources on the token. %s",
-			resp.StatusCode, msg)
-	}
-	for _, a := range out.Result {
-		if a.ID == accountID {
-			return ""
-		}
-	}
-	var ids []string
-	for _, a := range out.Result {
-		ids = append(ids, a.ID)
-		if len(ids) >= 5 {
-			break
-		}
-	}
-	return fmt.Sprintf(" CF_ACCOUNT_ID does not match any account this token can access (first IDs: %v). Fix CF_ACCOUNT_ID in .env or edit the token so Account resources include that account (or All accounts).", ids)
 }
 
 func main() {
@@ -371,6 +373,7 @@ func main() {
 		cfg.WebRoot = v
 	}
 	normalizeCFConfig(&cfg)
+	cfClient = cloudflare.NewClient(cfg.APIToken, cfg.AccountID)
 
 	if cfg.AdminUser == "" {
 		cfg.AdminUser = "admin"
@@ -387,6 +390,7 @@ func main() {
 	if strings.TrimSpace(cfg.WebRoot) == "" {
 		cfg.WebRoot = defaultWebRootDir()
 	}
+	cfClient = cloudflare.NewClient(cfg.APIToken, cfg.AccountID)
 
 	if err := initDB(); err != nil {
 		log.Fatalf("Failed to init DB: %v", err)
@@ -395,6 +399,8 @@ func main() {
 
 	// Quiet stdout: tunnel/DNS helpers use log.Printf; UI still has /api/logs in SQLite.
 	log.SetOutput(io.Discard)
+	appSvc = apps.NewService(db)
+	tunnelSvc = tunnels.NewService(db, cfClient, cfg.AccountID, cfg.APIToken != "", &tunnelProcs, logTunnel, newTunnelLogWriter)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
@@ -425,6 +431,20 @@ func main() {
 	r.GET("/api/domains", listDomains)
 	r.POST("/api/dns", createDNSRecord)
 	r.DELETE("/api/dns/:zoneId/:recordId", deleteDNSRecord)
+	r.GET("/api/apps", listApps)
+	r.POST("/api/apps", createApp)
+	r.GET("/api/apps/:id", getApp)
+	r.DELETE("/api/apps/:id", deleteApp)
+	r.GET("/api/apps/:id/tokens", listAppTokens)
+	r.POST("/api/apps/:id/tokens", createAppToken)
+	r.DELETE("/api/apps/:id/tokens/:tokenId", revokeAppToken)
+
+	v1 := gin.New()
+	v1.Use(gin.Recovery())
+	v1.Use(corsMiddleware())
+	// TODO: Extend this group with app-token-protected central API routes as tunnel/DNS
+	// orchestration is exposed to other internal apps.
+	v1.GET("/api/v1/me", appTokenAuthMiddleware(), requireAppScope("resources:read"), getAppMe)
 
 	webRoot := filepath.Clean(cfg.WebRoot)
 	assetsFS := filepath.Join(webRoot, "assets")
@@ -444,7 +464,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.ListenPort),
-		Handler: r,
+		Handler: joinRouters(r, v1),
 	}
 
 	go func() {
@@ -479,6 +499,16 @@ func corsMiddleware() gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+func joinRouters(primary http.Handler, v1 http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v1/") {
+			v1.ServeHTTP(w, r)
+			return
+		}
+		primary.ServeHTTP(w, r)
+	})
 }
 
 func initDB() error {
@@ -541,6 +571,27 @@ func initDB() error {
 			message TEXT,
 			FOREIGN KEY(tunnel_id) REFERENCES tunnels(id) ON DELETE CASCADE
 		);
+		CREATE TABLE IF NOT EXISTS apps (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			slug TEXT UNIQUE NOT NULL,
+			description TEXT DEFAULT '',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE TABLE IF NOT EXISTS app_tokens (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			app_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			token_hash TEXT NOT NULL,
+			token_prefix TEXT NOT NULL,
+			scopes TEXT NOT NULL DEFAULT '[]',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			expires_at DATETIME,
+			last_used_at DATETIME,
+			revoked_at DATETIME,
+			FOREIGN KEY(app_id) REFERENCES apps(id) ON DELETE CASCADE
+		);
 	`)
 	if err != nil {
 		return err
@@ -585,54 +636,25 @@ func createTunnel(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-
-	if req.AccountID == "" {
-		req.AccountID = cfg.AccountID
-	}
-
-	var tunnelUUID, tunnelToken string
-
-	apex, fetched, apexErr := resolveZoneApex(req.ZoneID, req.Domain)
-	if apexErr != nil {
-		log.Printf("[DNS] resolve apex at create: %v", apexErr)
-	}
-	if apex != "" {
-		req.Domain = apex
-	} else if isLikelyLegacyCorruptDomain(req.Domain) {
-		req.Domain = ""
-	}
-
-	if req.ZoneID != "" && req.Subdomain != "" && apex != "" && cfg.APIToken != "" && apexErr == nil {
-		if req.AccountID == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "CF_ACCOUNT_ID is required to register a tunnel with Cloudflare for DNS"})
-			return
-		}
-		var err error
-		tunnelUUID, tunnelToken, err = createRemoteCFDTunnel(req.AccountID, req.Name)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Cloudflare tunnel registration failed: " + err.Error()})
-			return
-		}
-	}
-
-	result, err := db.Exec("INSERT INTO tunnels (name, account_id, zone_id, subdomain, domain, address, uuid, tunnel_token, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'stopped')",
-		req.Name, req.AccountID, req.ZoneID, req.Subdomain, req.Domain, req.Address, tunnelUUID, tunnelToken)
+	result, err := tunnelSvc.CreateTunnel(c.Request.Context(), tunnels.CreateTunnelInput{
+		Name:      req.Name,
+		AccountID: req.AccountID,
+		ZoneID:    req.ZoneID,
+		Domain:    req.Domain,
+		Subdomain: req.Subdomain,
+		Address:   req.Address,
+	})
 	if err != nil {
+		var badReq *tunnels.BadRequestError
+		if errors.As(err, &badReq) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": badReq.Error()})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	id, _ := result.LastInsertId()
-	logTunnel(id, "info", "Tunnel created")
-	if fetched && apex != "" {
-		logTunnel(id, "info", "Resolved zone apex from Cloudflare API: "+apex)
-	}
-
-	if tunnelUUID != "" {
-		applyTunnelDNS(int(id), req.ZoneID, req.Subdomain, apex, tunnelUUID, "")
-	}
-
-	c.JSON(http.StatusCreated, gin.H{"id": id, "name": req.Name})
+	c.JSON(http.StatusCreated, gin.H{"id": result.ID, "name": result.Name})
 }
 
 func getTunnel(c *gin.Context) {
@@ -652,370 +674,46 @@ func getTunnel(c *gin.Context) {
 }
 
 func deleteTunnel(c *gin.Context) {
-	id := c.Param("id")
-
-	var t struct {
-		UUID        string `json:"uuid"`
-		DNSRecordID string `json:"dns_record_id"`
-		ZoneID      string `json:"zone_id"`
-		AccountID   string `json:"account_id"`
-		Subdomain   string `json:"subdomain"`
-		Domain      string `json:"domain"`
-	}
-	err := db.QueryRow("SELECT COALESCE(uuid, ''), COALESCE(dns_record_id, ''), COALESCE(zone_id, ''), COALESCE(account_id, ''), COALESCE(subdomain, ''), COALESCE(domain, '') FROM tunnels WHERE id = ?", id).
-		Scan(&t.UUID, &t.DNSRecordID, &t.ZoneID, &t.AccountID, &t.Subdomain, &t.Domain)
-	if err == sql.ErrNoRows {
+	result, err := tunnelSvc.DeleteTunnel(c.Request.Context(), c.Param("id"))
+	if errors.Is(err, tunnels.ErrTunnelNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Tunnel not found"})
 		return
 	}
-
-	stopTunnelProcess(id)
-
-	var warnings []string
-
-	// DNS cleanup: prefer stored record ID, then fallback to lookup by name.
-	if t.ZoneID != "" && cfg.APIToken != "" {
-		recordID := strings.TrimSpace(t.DNSRecordID)
-		if recordID == "" && strings.TrimSpace(t.Subdomain) != "" && strings.TrimSpace(t.Domain) != "" {
-			fqdn := strings.TrimSpace(t.Subdomain) + "." + strings.TrimSpace(t.Domain)
-			lookedUpID, lookErr := findCNAMERecordID(t.ZoneID, fqdn)
-			if lookErr != nil {
-				warnings = append(warnings, "DNS lookup before delete failed: "+lookErr.Error())
-			}
-			recordID = lookedUpID
-		}
-		if recordID != "" {
-			log.Printf("[tunnel] Deleting DNS record %s from zone %s", recordID, t.ZoneID)
-			if err := deleteDNSRecordByID(t.ZoneID, recordID); err != nil {
-				warnings = append(warnings, "DNS delete failed: "+err.Error())
-			}
-		}
-	}
-
-	if t.UUID != "" && cfg.APIToken != "" {
-		accID := t.AccountID
-		if accID == "" {
-			accID = cfg.AccountID
-		}
-		if accID == "" {
-			log.Printf("[tunnel] Cannot delete Cloudflare tunnel - no account_id stored and CF_ACCOUNT_ID not configured")
-		} else {
-			log.Printf("[tunnel] Deleting Cloudflare tunnel %s from account %s", t.UUID, accID)
-			if err := deleteRemoteTunnelWithRetry(accID, t.UUID); err != nil {
-				warnings = append(warnings, "Cloudflare tunnel delete failed: "+err.Error())
-			}
-		}
-	}
-
-	_, err = db.Exec("DELETE FROM tunnels WHERE id = ?", id)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	msg := "Tunnel deleted"
-	if len(warnings) > 0 {
-		msg = msg + " (with warnings)"
-	}
-	c.JSON(http.StatusOK, gin.H{"message": msg, "warnings": warnings})
-}
-
-func findCNAMERecordID(zoneID, fqdn string) (string, error) {
-	if zoneID == "" || fqdn == "" || cfg.APIToken == "" {
-		return "", nil
-	}
-	reqURL := fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/dns_records?type=CNAME&name=%s", zoneID, url.QueryEscape(fqdn))
-	req, err := http.NewRequest("GET", reqURL, nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+cfg.APIToken)
-	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	var out struct {
-		Success bool `json:"success"`
-		Result  []struct {
-			ID string `json:"id"`
-		} `json:"result"`
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
-	}
-	if err := json.Unmarshal(body, &out); err != nil {
-		return "", fmt.Errorf("parse dns lookup response: %w", err)
-	}
-	if !out.Success {
-		msg := string(body)
-		if len(out.Errors) > 0 && strings.TrimSpace(out.Errors[0].Message) != "" {
-			msg = out.Errors[0].Message
-		}
-		return "", fmt.Errorf(strings.TrimSpace(msg))
-	}
-	if len(out.Result) == 0 {
-		return "", nil
-	}
-	return out.Result[0].ID, nil
-}
-
-func deleteDNSRecordByID(zoneID, recordID string) error {
-	req, err := http.NewRequest("DELETE", "https://api.cloudflare.com/client/v4/zones/"+zoneID+"/dns_records/"+recordID, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+cfg.APIToken)
-	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	var out struct {
-		Success bool `json:"success"`
-		Errors  []struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-		} `json:"errors"`
-	}
-	if err := json.Unmarshal(body, &out); err != nil {
-		return fmt.Errorf("parse dns delete response: %w", err)
-	}
-	if !out.Success {
-		msg := string(body)
-		if len(out.Errors) > 0 && strings.TrimSpace(out.Errors[0].Message) != "" {
-			msg = out.Errors[0].Message
-		}
-		return fmt.Errorf(strings.TrimSpace(msg))
-	}
-	log.Printf("[tunnel] DNS record deleted (HTTP %d)", resp.StatusCode)
-	return nil
-}
-
-func deleteRemoteTunnelWithRetry(accountID, tunnelID string) error {
-	var lastErr error
-	for attempt := 1; attempt <= 5; attempt++ {
-		req, err := http.NewRequest("DELETE", "https://api.cloudflare.com/client/v4/accounts/"+accountID+"/cfd_tunnel/"+tunnelID, nil)
-		if err != nil {
-			return err
-		}
-		req.Header.Set("Authorization", "Bearer "+cfg.APIToken)
-		req.Header.Set("Content-Type", "application/json")
-		client := &http.Client{Timeout: 30 * time.Second}
-		resp, err := client.Do(req)
-		if err != nil {
-			lastErr = err
-		} else {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			log.Printf("[tunnel] Cloudflare tunnel delete response (attempt %d): HTTP %d, body: %s", attempt, resp.StatusCode, string(body))
-
-			var out struct {
-				Success bool `json:"success"`
-				Errors  []struct {
-					Code    int    `json:"code"`
-					Message string `json:"message"`
-				} `json:"errors"`
-			}
-			if err := json.Unmarshal(body, &out); err != nil {
-				lastErr = fmt.Errorf("parse tunnel delete response: %w", err)
-			} else if out.Success {
-				return nil
-			} else {
-				msg := string(body)
-				code := 0
-				if len(out.Errors) > 0 {
-					code = out.Errors[0].Code
-					if strings.TrimSpace(out.Errors[0].Message) != "" {
-						msg = out.Errors[0].Message
-					}
-				}
-				lastErr = fmt.Errorf(strings.TrimSpace(msg))
-				// 1022 = active tunnel connections still present; retry after short backoff.
-				if code == 1022 && attempt < 5 {
-					time.Sleep(time.Duration(attempt) * time.Second)
-					continue
-				}
-				return lastErr
-			}
-		}
-		if attempt < 5 {
-			time.Sleep(time.Duration(attempt) * time.Second)
-		}
-	}
-	return lastErr
+	c.JSON(http.StatusOK, gin.H{"message": result.Message, "warnings": result.Warnings})
 }
 
 func startTunnel(c *gin.Context) {
-	idStr := c.Param("id")
-	id, err := strconv.Atoi(idStr)
+	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tunnel ID"})
 		return
 	}
 
-	var t Tunnel
-	var dnsRecordID string
-	var tunnelToken string
-	err = db.QueryRow("SELECT id, name, uuid, account_id, zone_id, subdomain, domain, address, status, pid, COALESCE(dns_record_id, ''), COALESCE(tunnel_token, '') FROM tunnels WHERE id = ?", id).
-		Scan(&t.ID, &t.Name, &t.UUID, &t.AccountID, &t.ZoneID, &t.Subdomain, &t.Domain, &t.Address, &t.Status, &t.PID, &dnsRecordID, &tunnelToken)
-	if err == sql.ErrNoRows {
+	result, err := tunnelSvc.StartTunnel(c.Request.Context(), id)
+	if errors.Is(err, tunnels.ErrTunnelNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Tunnel not found"})
 		return
 	}
-
-	if t.Status == "running" && t.PID > 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Tunnel already running"})
+	var badReq *tunnels.BadRequestError
+	if errors.As(err, &badReq) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": badReq.Error()})
 		return
 	}
-
-	if t.UUID == "" {
-		acc := t.AccountID
-		if acc == "" {
-			acc = cfg.AccountID
-		}
-		if acc != "" && cfg.APIToken != "" {
-			uid, tok, err := createRemoteCFDTunnel(acc, t.Name)
-			if err != nil {
-				logTunnel(id, "error", "Cloudflare tunnel registration failed: "+err.Error())
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Cloudflare tunnel registration failed: " + err.Error()})
-				return
-			}
-			t.UUID = uid
-			tunnelToken = tok
-			db.Exec("UPDATE tunnels SET uuid = ?, tunnel_token = ? WHERE id = ?", t.UUID, tunnelToken, id)
-			logTunnel(id, "info", "Registered tunnel with Cloudflare: "+t.UUID)
-		} else {
-			t.UUID = generateToken()
-			db.Exec("UPDATE tunnels SET uuid = ? WHERE id = ?", t.UUID, id)
-			logTunnel(id, "info", "Generated local UUID (not a Cloudflare tunnel — DNS to .cfargotunnel.com will not work): "+t.UUID)
-		}
-	}
-
-	apex, fetched, apexErr := resolveZoneApex(t.ZoneID, t.Domain)
-	if apexErr != nil {
-		log.Printf("[DNS] Could not resolve zone apex for zone_id=%s: %v", t.ZoneID, apexErr)
-		logTunnel(id, "error", "Could not resolve zone apex: "+apexErr.Error())
-	} else if fetched && apex != "" {
-		t.Domain = apex
-		db.Exec("UPDATE tunnels SET domain = ? WHERE id = ?", apex, id)
-		logTunnel(id, "info", "Resolved zone apex from Cloudflare API: "+apex)
-	}
-
-	log.Printf("[DNS] ZoneID=%s Subdomain=%s Apex=%s APIToken=%v", t.ZoneID, t.Subdomain, apex, cfg.APIToken != "")
-	applyTunnelDNS(id, t.ZoneID, t.Subdomain, apex, t.UUID, dnsRecordID)
-
-	ingressRules, _ := getIngressRulesForTunnel(strconv.Itoa(id))
-
-	if t.Address != "" && len(ingressRules) == 0 {
-		hostname := ""
-		if t.Subdomain != "" && apex != "" {
-			hostname = t.Subdomain + "." + apex
-		}
-		_, err := db.Exec("INSERT INTO ingress_rules (tunnel_id, hostname, path, service, protocol) VALUES (?, ?, ?, ?, ?)",
-			id, hostname, "", t.Address, "http")
-		if err != nil {
-			logTunnel(id, "error", "Failed to create ingress rule: "+err.Error())
-		} else {
-			ingressRules, _ = getIngressRulesForTunnel(strconv.Itoa(id))
-			logTunnel(id, "info", "Created ingress rule for: "+t.Address)
-		}
-	}
-
-	if len(ingressRules) == 0 && t.Address == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "No address specified and no ingress rules configured"})
-		return
-	}
-
-	acc := t.AccountID
-	if acc == "" {
-		acc = cfg.AccountID
-	}
-	publicHost := ""
-	if strings.TrimSpace(t.Subdomain) != "" && strings.TrimSpace(apex) != "" {
-		publicHost = strings.TrimSpace(t.Subdomain) + "." + strings.TrimSpace(apex)
-	}
-	if tunnelToken != "" {
-		if err := pushTunnelIngress(acc, t.UUID, ingressRules, publicHost); err != nil {
-			logTunnel(id, "error", "Failed to push tunnel config to Cloudflare: "+err.Error())
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to push tunnel config: " + err.Error()})
-			return
-		}
-		logTunnel(id, "info", "Pushed ingress configuration to Cloudflare")
-	}
-
-	exeDir, _ := filepath.Abs(".")
-	binName := "cloudflared"
-	if runtime.GOOS == "windows" {
-		binName = "cloudflared.exe"
-	}
-	cloudflaredPath := filepath.Join(exeDir, binName)
-	if _, err := os.Stat(cloudflaredPath); err != nil {
-		cloudflaredPath = binName
-		exeDir = "."
-	}
-
-	logTunnel(id, "info", fmt.Sprintf("Starting tunnel with: %s", cloudflaredPath))
-
-	var cmd *exec.Cmd
-	if tunnelToken != "" {
-		cmd = exec.Command(cloudflaredPath, "tunnel", "run", "--token", tunnelToken)
-	} else {
-		configFile := generateConfig(t.Name, t.UUID, ingressRules)
-		logTunnel(id, "info", "Generated config: "+configFile)
-		cmd = exec.Command(cloudflaredPath, "tunnel", "--config", configFile, "run", t.UUID)
-	}
-	cmd.Dir = exeDir
-	cmd.Stdout = &logWriter{id: idStr, level: "info"}
-	cmd.Stderr = &logWriter{id: idStr, level: "error"}
-
-	logTunnel(id, "info", "Calling cmd.Start()...")
-	if err := cmd.Start(); err != nil {
-		logTunnel(id, "error", fmt.Sprintf("Failed to start: %v", err))
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	logTunnel(id, "info", "Tunnel process started")
 
-	db.Exec("UPDATE tunnels SET status = 'running', pid = ? WHERE id = ?", cmd.Process.Pid, id)
-	tunnelProcs.Store(idStr, cmd.Process)
-
-	logTunnel(id, "info", fmt.Sprintf("Tunnel started (PID: %d)", cmd.Process.Pid))
-	c.JSON(http.StatusOK, gin.H{"message": "Tunnel started", "pid": cmd.Process.Pid})
+	c.JSON(http.StatusOK, gin.H{"message": "Tunnel started", "pid": result.PID})
 }
 
 func stopTunnel(c *gin.Context) {
-	id := c.Param("id")
-
-	stopTunnelProcess(id)
-
-	db.Exec("UPDATE tunnels SET status = 'stopped', pid = 0 WHERE id = ?", id)
-	logTunnel(id, "info", "Tunnel stopped")
-
+	_ = tunnelSvc.StopTunnel(c.Request.Context(), c.Param("id"))
 	c.JSON(http.StatusOK, gin.H{"message": "Tunnel stopped"})
-}
-
-func stopTunnelProcess(id string) {
-	if p, ok := tunnelProcs.Load(id); ok {
-		proc := p.(*os.Process)
-		proc.Kill()
-		tunnelProcs.Delete(id)
-	}
-
-	var pid int
-	db.QueryRow("SELECT pid FROM tunnels WHERE id = ?", id).Scan(&pid)
-	if pid > 0 {
-		proc, _ := os.FindProcess(pid)
-		if proc != nil {
-			proc.Kill()
-		}
-		db.Exec("UPDATE tunnels SET status = 'stopped', pid = 0 WHERE id = ?", id)
-	}
 }
 
 func getTunnelLogs(c *gin.Context) {
@@ -1143,140 +841,10 @@ func getStatus(c *gin.Context) {
 	db.QueryRow("SELECT COUNT(*), SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END), SUM(CASE WHEN status = 'stopped' THEN 1 ELSE 0 END) FROM tunnels").Scan(&total, &running, &stopped)
 
 	c.JSON(http.StatusOK, gin.H{
-		"total":    total,
+		"total":   total,
 		"running": running,
 		"stopped": stopped,
 	})
-}
-
-func getIngressRulesForTunnel(tunnelID string) ([]IngressRule, error) {
-	rows, err := db.Query("SELECT id, tunnel_id, hostname, path, service, protocol FROM ingress_rules WHERE tunnel_id = ?", tunnelID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var rules []IngressRule
-	for rows.Next() {
-		var r IngressRule
-		rows.Scan(&r.ID, &r.TunnelID, &r.Hostname, &r.Path, &r.Service, &r.Protocol)
-		rules = append(rules, r)
-	}
-	return rules, nil
-}
-
-func generateConfig(name, uuid string, rules []IngressRule) string {
-	var buf bytes.Buffer
-	buf.WriteString(fmt.Sprintf("tunnelName: %s\ntunnelID: %s\n", name, uuid))
-	buf.WriteString("ingress:\n")
-
-	for _, r := range rules {
-		buf.WriteString("  - hostname: " + r.Hostname + "\n")
-		buf.WriteString("    service: " + originServiceURLForIngress(r.Service) + "\n")
-		if r.Path != "" {
-			buf.WriteString("    path: " + r.Path + "\n")
-		}
-	}
-
-	configDir := filepath.Join(os.TempDir(), "cloudflared")
-	os.MkdirAll(configDir, 0755)
-	path := filepath.Join(configDir, name+".yml")
-	os.WriteFile(path, []byte(buf.String()), 0644)
-	return path
-}
-
-func generateToken() string {
-	b := make([]byte, 32)
-	rand.Read(b)
-	return fmt.Sprintf("%x", b)
-}
-
-// sanitizeTunnelNameForCF maps app tunnel names to Cloudflare's allowed tunnel name characters.
-func sanitizeTunnelNameForCF(name string) string {
-	name = strings.ToLower(strings.TrimSpace(name))
-	var b strings.Builder
-	lastDash := false
-	for _, r := range name {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			b.WriteRune(r)
-			lastDash = false
-		case r == '-', r == '_', r == ' ', r == '.':
-			if b.Len() > 0 && !lastDash {
-				b.WriteRune('-')
-				lastDash = true
-			}
-		}
-	}
-	out := strings.Trim(b.String(), "-")
-	if len(out) > 90 {
-		out = out[:90]
-	}
-	if out == "" {
-		out = "tunnel"
-	}
-	return out
-}
-
-func tunnelNameSuffix() string {
-	b := make([]byte, 4)
-	rand.Read(b)
-	return fmt.Sprintf("%x", b)
-}
-
-// originServiceURLForIngress returns an origin-only service URL for Cloudflare tunnel ingress.
-// Cloudflare rejects any path/query on the service URL ("eyeball request's path" error). Trailing slashes count.
-//
-// net/url.Parse mis-parses bare "host:port" (e.g. localhost:38427) as scheme "localhost", so we prepend http:// when there is no "://" and no usable Host.
-func originServiceURLForIngress(service string) string {
-	orig := strings.TrimSpace(service)
-	if orig == "" {
-		return orig
-	}
-	s := orig
-	u, err := url.Parse(s)
-	if err != nil {
-		return orig
-	}
-	// Bare host:port without scheme — Go assigns a fake scheme; Host stays empty.
-	if !strings.Contains(s, "://") && u.Host == "" {
-		u2, err2 := url.Parse("http://" + s)
-		if err2 == nil && u2.Host != "" {
-			u = u2
-		}
-	}
-	scheme := strings.ToLower(u.Scheme)
-	if scheme == "unix" {
-		return orig
-	}
-	if scheme != "http" && scheme != "https" && scheme != "tcp" && scheme != "udp" {
-		return orig
-	}
-	if u.Host == "" {
-		return orig
-	}
-	var clean string
-	switch scheme {
-	case "http", "https":
-		clean = (&url.URL{Scheme: u.Scheme, User: u.User, Host: u.Host}).String()
-	case "tcp", "udp":
-		clean = (&url.URL{Scheme: u.Scheme, Host: u.Host}).String()
-	default:
-		return orig
-	}
-	if clean != orig {
-		log.Printf("[tunnel] normalized service URL %q -> %q (Cloudflare ingress requires origin root only)", orig, clean)
-	}
-	return clean
-}
-
-func normalizeIngressHostname(h string) string {
-	h = strings.TrimSpace(strings.ToLower(h))
-	h = strings.TrimSuffix(h, ".")
-	if i := strings.IndexByte(h, '/'); i >= 0 {
-		h = h[:i]
-	}
-	return strings.TrimSpace(h)
 }
 
 func logTunnel(tunnelID interface{}, level, msg string) {
@@ -1291,310 +859,163 @@ type logWriter struct {
 	level string
 }
 
+func newTunnelLogWriter(id string, level string) io.Writer {
+	return logWriter{id: id, level: level}
+}
+
 func (w logWriter) Write(p []byte) (int, error) {
 	logTunnel(w.id, w.level, string(p))
 	return len(p), nil
 }
 
-type Zone struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+func parseIDParam(c *gin.Context, name string) (int64, bool) {
+	id, err := strconv.ParseInt(c.Param(name), 10, 64)
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid " + name})
+		return 0, false
+	}
+	return id, true
 }
 
-// isLikelyLegacyCorruptDomain detects values stored by the old bug (subdomain + "." + zone UUID).
-func isLikelyLegacyCorruptDomain(domain string) bool {
-	domain = strings.TrimSpace(domain)
-	if domain == "" {
-		return false
-	}
-	i := strings.LastIndex(domain, ".")
-	if i <= 0 {
-		return false
-	}
-	tail := domain[i+1:]
-	if len(tail) != 32 {
-		return false
-	}
-	for _, c := range tail {
-		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') {
-			continue
-		}
-		return false
-	}
-	return true
-}
-
-func fetchZoneName(zoneID string) (string, error) {
-	req, err := http.NewRequest("GET", "https://api.cloudflare.com/client/v4/zones/"+zoneID, nil)
+func listApps(c *gin.Context) {
+	items, err := appSvc.ListApps(c.Request.Context())
 	if err != nil {
-		return "", err
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
-	req.Header.Set("Authorization", "Bearer "+cfg.APIToken)
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-
-	var result struct {
-		Success bool `json:"success"`
-		Result  struct {
-			Name string `json:"name"`
-		} `json:"result"`
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return "", err
-	}
-	if !result.Success && len(result.Errors) > 0 {
-		return "", fmt.Errorf("%s", result.Errors[0].Message)
-	}
-	if result.Result.Name == "" {
-		return "", fmt.Errorf("empty zone name")
-	}
-	return result.Result.Name, nil
+	c.JSON(http.StatusOK, items)
 }
 
-// createRemoteCFDTunnel registers a named tunnel in Cloudflare so DNS CNAME targets like {id}.cfargotunnel.com are valid.
-// On HTTP 409 (name already taken), retries with a suffixed name so a leftover tunnel from a failed run does not block creates.
-func createRemoteCFDTunnel(accountID, tunnelName string) (tunnelID, tunnelToken string, err error) {
-	if accountID == "" {
-		return "", "", fmt.Errorf("account ID is empty")
+func createApp(c *gin.Context) {
+	var req apps.CreateAppInput
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
-	if cfg.APIToken == "" {
-		return "", "", fmt.Errorf("API token is empty")
+	item, err := appSvc.CreateApp(c.Request.Context(), req)
+	if err != nil {
+		switch {
+		case errors.Is(err, apps.ErrInvalidSlug):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Slug must use lowercase letters, numbers, and hyphens only"})
+		case errors.Is(err, apps.ErrDuplicateSlug):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "App slug already exists"})
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		}
+		return
 	}
-	base := sanitizeTunnelNameForCF(tunnelName)
-	for attempt := 0; attempt < 8; attempt++ {
-		cfName := base
-		if attempt > 0 {
-			cfName = base + "-" + tunnelNameSuffix()
-			if len(cfName) > 100 {
-				cfName = cfName[:100]
-			}
-		}
-		body, err := json.Marshal(map[string]string{
-			"name":       cfName,
-			"config_src": "cloudflare",
-		})
-		if err != nil {
-			return "", "", err
-		}
-		url := fmt.Sprintf("https://api.cloudflare.com/client/v4/accounts/%s/cfd_tunnel", accountID)
-		req, err := http.NewRequest("POST", url, bytes.NewReader(body))
-		if err != nil {
-			return "", "", err
-		}
-		req.Header.Set("Authorization", "Bearer "+cfg.APIToken)
-		req.Header.Set("Content-Type", "application/json")
-		client := &http.Client{Timeout: 60 * time.Second}
-		resp, err := client.Do(req)
-		if err != nil {
-			return "", "", err
-		}
-		respBody, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		var out struct {
-			Success bool `json:"success"`
-			Result  struct {
-				ID    string `json:"id"`
-				Token string `json:"token"`
-			} `json:"result"`
-			Errors []struct {
-				Code    int    `json:"code"`
-				Message string `json:"message"`
-			} `json:"errors"`
-		}
-		if err := json.Unmarshal(respBody, &out); err != nil {
-			return "", "", fmt.Errorf("parse response: %w", err)
-		}
-		if out.Success && len(out.Errors) == 0 && out.Result.ID != "" && out.Result.Token != "" {
-			if attempt > 0 {
-				log.Printf("[tunnel] registered in Cloudflare as %q (name %q was already taken)", cfName, base)
-			}
-			return out.Result.ID, out.Result.Token, nil
-		}
-		msg := "unknown error"
-		if len(out.Errors) > 0 {
-			msg = out.Errors[0].Message
-		}
-		if resp.StatusCode == 409 {
-			log.Printf("[tunnel] Cloudflare 409 for name %q: %s — retrying with a new suffix", cfName, msg)
-			continue
-		}
-		if resp.StatusCode == 401 || resp.StatusCode == 403 ||
-			strings.EqualFold(msg, "Authentication error") ||
-			strings.Contains(strings.ToLower(msg), "auth") {
-			accHint := strings.TrimSpace(validateAccountIDForTunnelAPI(accountID))
-			if accHint != "" {
-				accHint = " " + accHint
-			}
-			return "", "", fmt.Errorf("%s (HTTP %d).%s Also ensure the token has Cloudflare One Connector: cloudflared — Write (tunnel registration is not allowed with Zone DNS–only tokens).",
-				msg, resp.StatusCode, accHint)
-		}
-		return "", "", fmt.Errorf("%s (HTTP %d)", msg, resp.StatusCode)
-	}
-	return "", "", fmt.Errorf("could not register tunnel after retries: Cloudflare keeps returning 409 (name conflict). Delete the old tunnel in Zero Trust → Networks → Tunnels, or pick another tunnel name in this app")
+	c.JSON(http.StatusCreated, item)
 }
 
-// pushTunnelIngress uploads ingress rules for a remotely managed tunnel (used with tunnel run --token).
-// publicHost is the FQDN for this tunnel (e.g. app.example.com); used when a stored rule has no hostname.
-// Cloudflare rejects multiple ingress rows without hostname (only the final catch-all may omit it).
-func pushTunnelIngress(accountID, tunnelID string, rules []IngressRule, publicHost string) error {
-	if accountID == "" || tunnelID == "" {
-		return fmt.Errorf("account ID and tunnel ID are required")
+func getApp(c *gin.Context) {
+	id, ok := parseIDParam(c, "id")
+	if !ok {
+		return
 	}
-	publicHost = normalizeIngressHostname(publicHost)
-	type cfIngress struct {
-		Hostname string `json:"hostname,omitempty"`
-		Path     string `json:"path,omitempty"`
-		Service  string `json:"service"`
+	item, err := appSvc.GetApp(c.Request.Context(), id)
+	if errors.Is(err, apps.ErrAppNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "App not found"})
+		return
 	}
-	// Deduplicate by (hostname, path): Cloudflare rejects overlapping rules with the same eyeball match.
-	seen := make(map[string]int)
-	ingress := make([]cfIngress, 0, len(rules)+1)
-	for _, r := range rules {
-		host := strings.TrimSpace(r.Hostname)
-		if host == "" {
-			host = publicHost
-		}
-		host = normalizeIngressHostname(host)
-		if host == "" {
-			return fmt.Errorf("ingress needs a public hostname: set subdomain + domain on the tunnel, or give each ingress rule a hostname (Cloudflare does not allow multiple hostname-less rules)")
-		}
-		pathKey := strings.TrimSpace(r.Path)
-		if pathKey == "/" {
-			pathKey = ""
-		}
-		key := host + "\x00" + pathKey
-		ing := cfIngress{
-			Hostname: host,
-			Service:  originServiceURLForIngress(r.Service),
-		}
-		if pathKey != "" {
-			ing.Path = pathKey
-		}
-		if i, ok := seen[key]; ok {
-			ingress[i] = ing
-			continue
-		}
-		seen[key] = len(ingress)
-		ingress = append(ingress, ing)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
-	ingress = append(ingress, cfIngress{Service: "http_status:404"})
-	payload := map[string]interface{}{
-		"config": map[string]interface{}{
-			"ingress": ingress,
+	c.JSON(http.StatusOK, item)
+}
+
+func deleteApp(c *gin.Context) {
+	id, ok := parseIDParam(c, "id")
+	if !ok {
+		return
+	}
+	err := appSvc.DeleteApp(c.Request.Context(), id)
+	switch {
+	case errors.Is(err, apps.ErrAppNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "App not found"})
+	case errors.Is(err, apps.ErrAppHasTokens):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Revoke app tokens before deleting this app"})
+	case err != nil:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	default:
+		c.JSON(http.StatusOK, gin.H{"message": "App deleted"})
+	}
+}
+
+func listAppTokens(c *gin.Context) {
+	id, ok := parseIDParam(c, "id")
+	if !ok {
+		return
+	}
+	items, err := appSvc.ListTokens(c.Request.Context(), id)
+	if errors.Is(err, apps.ErrAppNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "App not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, items)
+}
+
+func createAppToken(c *gin.Context) {
+	id, ok := parseIDParam(c, "id")
+	if !ok {
+		return
+	}
+	var req apps.CreateAppTokenInput
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	created, err := appSvc.CreateToken(c.Request.Context(), id, req)
+	if errors.Is(err, apps.ErrAppNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "App not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusCreated, created)
+}
+
+func revokeAppToken(c *gin.Context) {
+	id, ok := parseIDParam(c, "id")
+	if !ok {
+		return
+	}
+	tokenID, ok := parseIDParam(c, "tokenId")
+	if !ok {
+		return
+	}
+	err := appSvc.RevokeToken(c.Request.Context(), id, tokenID)
+	switch {
+	case errors.Is(err, apps.ErrAppNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "App not found"})
+	case errors.Is(err, apps.ErrTokenNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "Token not found"})
+	case err != nil:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	default:
+		c.JSON(http.StatusOK, gin.H{"message": "Token revoked"})
+	}
+}
+
+func getAppMe(c *gin.Context) {
+	rawApp, _ := c.Get("app")
+	rawScopes, _ := c.Get("app_scopes")
+	app, _ := rawApp.(apps.App)
+	scopes, _ := rawScopes.([]string)
+	c.JSON(http.StatusOK, gin.H{
+		"app": gin.H{
+			"id":   app.ID,
+			"name": app.Name,
+			"slug": app.Slug,
 		},
-	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/accounts/%s/cfd_tunnel/%s/configurations", accountID, tunnelID)
-	req, err := http.NewRequest("PUT", url, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+cfg.APIToken)
-	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	var out struct {
-		Success bool `json:"success"`
-		Errors  []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
-		Messages []struct {
-			Message string `json:"message"`
-		} `json:"messages"`
-	}
-	if err := json.Unmarshal(respBody, &out); err != nil {
-		return fmt.Errorf("parse response: %w", err)
-	}
-	if !out.Success || len(out.Errors) > 0 {
-		msg := string(respBody)
-		if len(out.Errors) > 0 {
-			msg = out.Errors[0].Message
-		}
-		for _, m := range out.Messages {
-			if strings.TrimSpace(m.Message) != "" {
-				msg = msg + " | " + m.Message
-			}
-		}
-		log.Printf("[tunnel] push ingress rejected (HTTP %d): %s | sent: %s", resp.StatusCode, msg, string(body))
-		return fmt.Errorf("%s", strings.TrimSpace(msg))
-	}
-	return nil
-}
-
-// resolveZoneApex returns the apex hostname (e.g. example.com). fetchedFromAPI is true when loaded via GET /zones/{id}.
-func resolveZoneApex(zoneID, domainStored string) (apex string, fetchedFromAPI bool, err error) {
-	apex = strings.TrimSpace(domainStored)
-	if isLikelyLegacyCorruptDomain(apex) {
-		apex = ""
-	}
-	if apex != "" {
-		return apex, false, nil
-	}
-	if zoneID == "" || cfg.APIToken == "" {
-		return "", false, nil
-	}
-	name, err := fetchZoneName(zoneID)
-	if err != nil {
-		return "", false, err
-	}
-	return name, true, nil
-}
-
-// applyTunnelDNS creates the Cloudflare CNAME for this tunnel if missing.
-func applyTunnelDNS(id int, zoneID, subdomain, apex, tunnelUUID, existingDNSID string) {
-	if existingDNSID != "" {
-		logTunnel(id, "info", "DNS record already present, skipping creation")
-		return
-	}
-	if zoneID == "" || subdomain == "" || apex == "" || cfg.APIToken == "" || tunnelUUID == "" {
-		logTunnel(id, "info", "Skipping DNS - need zone_id, subdomain, apex, tunnel UUID, and API token")
-		return
-	}
-	fullDomain := subdomain + "." + apex
-	log.Printf("[DNS] Creating CNAME: %s -> %s.cfargotunnel.com", fullDomain, tunnelUUID)
-	recordID, err := createCNAME(zoneID, fullDomain, tunnelUUID+".cfargotunnel.com")
-	if err != nil {
-		log.Printf("[DNS] ERROR: %v", err)
-		logTunnel(id, "error", "DNS CNAME failed: "+err.Error())
-		return
-	}
-	if recordID != "" {
-		db.Exec("UPDATE tunnels SET dns_record_id = ? WHERE id = ?", recordID, id)
-		logTunnel(id, "info", "DNS CNAME record created: "+fullDomain+" -> "+tunnelUUID+".cfargotunnel.com")
-		log.Printf("[DNS] Created record ID: %s", recordID)
-	} else {
-		log.Printf("[DNS] Empty recordID returned")
-		logTunnel(id, "error", "DNS CNAME returned empty recordID")
-	}
-}
-
-type DNSRecord struct {
-	ID      string `json:"id"`
-	Type    string `json:"type"`
-	Name    string `json:"name"`
-	Content string `json:"content"`
+		"scopes": scopes,
+	})
 }
 
 func listDomains(c *gin.Context) {
@@ -1606,41 +1027,15 @@ func listDomains(c *gin.Context) {
 	page := c.DefaultQuery("page", "1")
 	perPage := c.DefaultQuery("per_page", "50")
 
-	req, _ := http.NewRequest("GET", "https://api.cloudflare.com/client/v4/zones?page="+page+"&per_page="+perPage, nil)
-	req.Header.Set("Authorization", "Bearer "+cfg.APIToken)
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	result, err := cfClient.ListZones(c.Request.Context(), page, perPage)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	log.Printf("Cloudflare API response status: %d", resp.StatusCode)
-
-	var result struct {
-		Success  bool   `json:"success"`
-		Errors   []struct{ Message string } `json:"errors"`
-		Result   []Zone `json:"result"`
-		ResultInfo struct {
-			TotalCount int `json:"total_count"`
-		} `json:"result_info"`
-		Page    int `json:"page"`
-		PerPage int `json:"per_page"`
-	}
-	json.Unmarshal(body, &result)
-
-	if !result.Success && len(result.Errors) > 0 {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": result.Errors[0].Message})
-		return
-	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"domains":  result.Result,
-		"total":    result.ResultInfo.TotalCount,
+		"domains":  result.Domains,
+		"total":    result.Total,
 		"page":     result.Page,
 		"per_page": result.PerPage,
 	})
@@ -1667,30 +1062,17 @@ func createDNSRecord(c *gin.Context) {
 		req.Type = "CNAME"
 	}
 
-	body, _ := json.Marshal(map[string]string{
-		"type":    req.Type,
-		"name":    req.Name,
-		"content": req.Content,
-	})
-
-	httpReq, _ := http.NewRequest("POST", "https://api.cloudflare.com/client/v4/zones/"+req.ZoneID+"/dns_records", bytes.NewBuffer(body))
-	httpReq.Header.Set("Authorization", "Bearer "+cfg.APIToken)
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(httpReq)
+	record, err := cfClient.CreateDNSRecord(c.Request.Context(), req.ZoneID, cloudflare.DNSRecord{
+		Type:    req.Type,
+		Name:    req.Name,
+		Content: req.Content,
+	}, nil)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	defer resp.Body.Close()
 
-	var result struct {
-		Result DNSRecord `json:"result"`
-	}
-	json.NewDecoder(resp.Body).Decode(&result)
-
-	c.JSON(http.StatusCreated, result.Result)
+	c.JSON(http.StatusCreated, record)
 }
 
 func deleteDNSRecord(c *gin.Context) {
@@ -1702,60 +1084,10 @@ func deleteDNSRecord(c *gin.Context) {
 		return
 	}
 
-	httpReq, _ := http.NewRequest("DELETE", "https://api.cloudflare.com/client/v4/zones/"+zoneID+"/dns_records/"+recordID, nil)
-	httpReq.Header.Set("Authorization", "Bearer "+cfg.APIToken)
-
-	client := &http.Client{}
-	resp, err := client.Do(httpReq)
-	if err != nil {
+	if err := cfClient.DeleteDNSRecord(c.Request.Context(), zoneID, recordID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	defer resp.Body.Close()
 
 	c.JSON(http.StatusOK, gin.H{"message": "DNS record deleted"})
-}
-
-func createCNAME(zoneID, name, content string) (string, error) {
-	body, _ := json.Marshal(map[string]interface{}{
-		"type":    "CNAME",
-		"name":    name,
-		"content": content,
-		"proxied": true,
-	})
-
-	log.Printf("[DNS API] POST to zones/%s/dns_records", zoneID)
-	log.Printf("[DNS API] Body: %s", string(body))
-
-	httpReq, _ := http.NewRequest("POST", "https://api.cloudflare.com/client/v4/zones/"+zoneID+"/dns_records", bytes.NewBuffer(body))
-	httpReq.Header.Set("Authorization", "Bearer "+cfg.APIToken)
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		log.Printf("[DNS API] Request failed: %v", err)
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	log.Printf("[DNS API] Response status: %d body: %s", resp.StatusCode, string(respBody))
-
-	var result struct {
-		Result struct {
-			ID string `json:"id"`
-		} `json:"result"`
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
-	}
-	json.Unmarshal(respBody, &result)
-
-	if len(result.Errors) > 0 {
-		log.Printf("[DNS API] Errors: %+v", result.Errors)
-		return "", fmt.Errorf(result.Errors[0].Message)
-	}
-
-	return result.Result.ID, nil
 }

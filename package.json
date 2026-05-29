@@ -1,0 +1,9 @@
+{
+  "name": "cf-tunnels-workspace",
+  "private": true,
+  "packageManager": "pnpm@10.24.0",
+  "scripts": {
+    "dev": "pnpm -r --parallel --filter ./backend --filter ./frontend run dev",
+    "build": "pnpm -r --filter ./backend --filter ./frontend run build"
+  }
+}

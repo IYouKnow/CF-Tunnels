@@ -1,3 +1,6 @@
+//go:build dbtools
+// +build dbtools
+
 package main
 
 import (

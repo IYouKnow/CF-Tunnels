@@ -1,3 +1,6 @@
+//go:build dbtools
+// +build dbtools
+
 package main
 
 import (
@@ -11,7 +14,7 @@ import (
 func main() {
 	// Check both possible locations
 	dbs := []string{"tunnels.db", "../tunnels.db"}
-	
+
 	for _, dbPath := range dbs {
 		fmt.Printf("\n=== Checking %s ===\n", dbPath)
 		db, err := sql.Open("sqlite", dbPath+"?cache=shared")
