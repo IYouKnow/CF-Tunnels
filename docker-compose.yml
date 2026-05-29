@@ -44,8 +44,8 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-changeme}
       SESSION_SECRET: ${SESSION_SECRET:-}
     volumes:
-      - cf-tunnels-data:/app/data
-      - cf-tunnels-config:/app/config
+      - /DATA/AppData/cf-tunnels/data:/app/data
+      - /DATA/AppData/cf-tunnels/config:/app/config
     restart: unless-stopped
     stop_grace_period: 15s
     healthcheck:
@@ -60,7 +60,3 @@ services:
       cf-tunnels.webui.port: "38427"
       cf-tunnels.webui.scheme: "http"
       cf-tunnels.webui.path: "/"
-
-volumes:
-  cf-tunnels-data:
-  cf-tunnels-config:
