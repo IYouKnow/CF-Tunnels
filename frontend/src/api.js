@@ -1,7 +1,7 @@
 import axios from 'axios'
 
 const inferredDevBase = window.location.port === '8080'
-  ? `${window.location.protocol}//${window.location.hostname}:3000`
+  ? `${window.location.protocol}//${window.location.hostname}:38427`
   : ''
 
 const client = axios.create({

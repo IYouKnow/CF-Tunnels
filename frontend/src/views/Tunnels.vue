@@ -78,8 +78,8 @@
           </div>
           <div class="form-group">
             <label>Destination Address (optional)</label>
-            <input v-model="newTunnel.address" type="text" placeholder="http://localhost:3000" />
-            <small>The target service to tunnel to (e.g., http://localhost:3000, tcp://localhost:22)</small>
+            <input v-model="newTunnel.address" type="text" placeholder="http://localhost:38427" />
+            <small>The target service to tunnel to (e.g., http://localhost:38427, tcp://localhost:22)</small>
           </div>
           <div class="modal-actions">
             <button type="button" class="btn-secondary" @click="showCreateModal = false">Cancel</button>

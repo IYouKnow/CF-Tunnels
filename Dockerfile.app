@@ -41,10 +41,10 @@ RUN mkdir -p /app/bin /app/share/web /app/data /app/config
 COPY --from=builder /out/cf-tunnels /app/bin/cf-tunnels
 COPY --from=builder /build/frontend/dist /app/share/web
 
-ENV LISTEN_PORT=3000
+ENV LISTEN_PORT=38427
 ENV DATA_DIR=/app/data
 ENV WEB_ROOT=/app/share/web
 
-EXPOSE 3000
+EXPOSE 38427
 
 CMD ["/app/bin/cf-tunnels"]

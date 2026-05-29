@@ -9,7 +9,7 @@ x-casaos:
     en_us: CF Tunnels
   description:
     en_us: Web UI for Cloudflare Tunnel and DNS management.
-  port_map: "3000"
+  port_map: "38427"
   scheme: http
   index: /
 
@@ -19,9 +19,9 @@ x-webui:
   description: Web UI for Cloudflare Tunnel and DNS management.
   scheme: http
   path: /
-  web_ui_port: 3000
-  container_port: 3000
-  host_port: 3000
+  web_ui_port: 38427
+  container_port: 38427
+  host_port: 38427
 
 services:
   cf-tunnels:
@@ -32,10 +32,10 @@ services:
     container_name: cf-tunnels
     network_mode: bridge
     ports:
-      - "3000:3000"
+      - "38427:38427"
     environment:
       TZ: UTC
-      LISTEN_PORT: "3000"
+      LISTEN_PORT: "38427"
       DATA_DIR: /app/data
       WEB_ROOT: /app/share/web
       CF_API_TOKEN: ${CF_API_TOKEN}
@@ -44,12 +44,12 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-changeme}
       SESSION_SECRET: ${SESSION_SECRET:-}
     volumes:
-      - ./data:/app/data
-      - ./config:/app/config
+      - cf-tunnels-data:/app/data
+      - cf-tunnels-config:/app/config
     restart: unless-stopped
     stop_grace_period: 15s
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://127.0.0.1:3000/"]
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:38427/"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -57,6 +57,10 @@ services:
     labels:
       org.opencontainers.image.title: "CF Tunnels"
       org.opencontainers.image.description: "Web UI for Cloudflare Tunnel and DNS management"
-      cf-tunnels.webui.port: "3000"
+      cf-tunnels.webui.port: "38427"
       cf-tunnels.webui.scheme: "http"
       cf-tunnels.webui.path: "/"
+
+volumes:
+  cf-tunnels-data:
+  cf-tunnels-config:

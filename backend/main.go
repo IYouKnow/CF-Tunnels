@@ -379,7 +379,7 @@ func main() {
 		cfg.AdminPass = "changeme"
 	}
 	if cfg.ListenPort == 0 {
-		cfg.ListenPort = 3000
+		cfg.ListenPort = 38427
 	}
 	if strings.TrimSpace(cfg.DataDir) == "" {
 		cfg.DataDir = "."
@@ -1227,7 +1227,7 @@ func tunnelNameSuffix() string {
 // originServiceURLForIngress returns an origin-only service URL for Cloudflare tunnel ingress.
 // Cloudflare rejects any path/query on the service URL ("eyeball request's path" error). Trailing slashes count.
 //
-// net/url.Parse mis-parses bare "host:port" (e.g. localhost:3000) as scheme "localhost", so we prepend http:// when there is no "://" and no usable Host.
+// net/url.Parse mis-parses bare "host:port" (e.g. localhost:38427) as scheme "localhost", so we prepend http:// when there is no "://" and no usable Host.
 func originServiceURLForIngress(service string) string {
 	orig := strings.TrimSpace(service)
 	if orig == "" {
