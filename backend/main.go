@@ -24,6 +24,7 @@ import (
 
 	"github.com/cf-tunnel-manager/backend/internal/apps"
 	"github.com/cf-tunnel-manager/backend/internal/cloudflare"
+	dnsservice "github.com/cf-tunnel-manager/backend/internal/dns"
 	"github.com/cf-tunnel-manager/backend/internal/tunnels"
 	"github.com/gin-gonic/gin"
 	_ "github.com/glebarez/sqlite"
@@ -79,6 +80,7 @@ var (
 	cfg         Config
 	appSvc      *apps.Service
 	cfClient    *cloudflare.Client
+	dnsSvc      *dnsservice.Service
 	tunnelSvc   *tunnels.Service
 	tunnelProcs = sync.Map{}
 )
@@ -400,6 +402,7 @@ func main() {
 	// Quiet stdout: tunnel/DNS helpers use log.Printf; UI still has /api/logs in SQLite.
 	log.SetOutput(io.Discard)
 	appSvc = apps.NewService(db)
+	dnsSvc = dnsservice.NewService(cfClient)
 	tunnelSvc = tunnels.NewService(db, cfClient, cfg.AccountID, cfg.APIToken != "", &tunnelProcs, logTunnel, newTunnelLogWriter)
 
 	gin.SetMode(gin.ReleaseMode)
@@ -445,6 +448,9 @@ func main() {
 	// TODO: Extend this group with app-token-protected central API routes as tunnel/DNS
 	// orchestration is exposed to other internal apps.
 	v1.GET("/api/v1/me", appTokenAuthMiddleware(), requireAppScope("resources:read"), getAppMe)
+	v1.POST("/api/v1/dns/ensure", appTokenAuthMiddleware(), ensureAppDNSRecord)
+	v1.GET("/api/v1/dns/:hostname", appTokenAuthMiddleware(), requireAppScope("dns:read"), getAppDNSRecord)
+	v1.PATCH("/api/v1/dns/:hostname", appTokenAuthMiddleware(), requireAppScope("dns:update"), patchAppDNSRecord)
 
 	webRoot := filepath.Clean(cfg.WebRoot)
 	assetsFS := filepath.Join(webRoot, "assets")
@@ -491,7 +497,7 @@ func corsMiddleware() gin.HandlerFunc {
 			c.Header("Vary", "Origin")
 			c.Header("Access-Control-Allow-Credentials", "true")
 			c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		}
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)
@@ -1018,6 +1024,153 @@ func getAppMe(c *gin.Context) {
 	})
 }
 
+func appScopesFromContext(c *gin.Context) ([]string, bool) {
+	rawScopes, exists := c.Get("app_scopes")
+	if !exists {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Missing app scopes"})
+		return nil, false
+	}
+	scopes, ok := rawScopes.([]string)
+	if !ok {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Invalid app scopes"})
+		return nil, false
+	}
+	return scopes, true
+}
+
+func hasAnyAppScope(scopes []string, required ...string) bool {
+	for _, scope := range required {
+		if apps.RequireScope(scopes, scope) == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func ensureAppDNSRecord(c *gin.Context) {
+	scopes, ok := appScopesFromContext(c)
+	if !ok {
+		return
+	}
+	if !hasAnyAppScope(scopes, "dns:read", "dns:create", "dns:update") {
+		c.JSON(http.StatusForbidden, gin.H{"error": "missing required scope: dns:read"})
+		return
+	}
+
+	var req dnsservice.EnsureInput
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	plan, err := dnsSvc.PrepareEnsure(c.Request.Context(), req)
+	if err != nil {
+		switch {
+		case errors.Is(err, dnsservice.ErrInvalidHostname):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid hostname"})
+		case errors.Is(err, dnsservice.ErrUnsupportedRecord):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Supported DNS record types are A, AAAA, CNAME, and TXT"})
+		case errors.Is(err, dnsservice.ErrMissingContent):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Content is required"})
+		case errors.Is(err, dnsservice.ErrZoneNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "No matching Cloudflare zone found for hostname"})
+		case errors.Is(err, dnsservice.ErrCloudflareUnconfigured):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Cloudflare API token not configured"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
+		return
+	}
+
+	switch plan.Action {
+	case "create":
+		if !hasAnyAppScope(scopes, "dns:create") {
+			c.JSON(http.StatusForbidden, gin.H{"error": "missing required scope: dns:create"})
+			return
+		}
+	case "update":
+		if !hasAnyAppScope(scopes, "dns:update") {
+			c.JSON(http.StatusForbidden, gin.H{"error": "missing required scope: dns:update"})
+			return
+		}
+	default:
+		if !hasAnyAppScope(scopes, "dns:read", "dns:update") {
+			c.JSON(http.StatusForbidden, gin.H{"error": "missing required scope: dns:read"})
+			return
+		}
+	}
+
+	record, _, err := dnsSvc.EnsureRecord(c.Request.Context(), req)
+	if err != nil {
+		switch {
+		case errors.Is(err, dnsservice.ErrInvalidHostname):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid hostname"})
+		case errors.Is(err, dnsservice.ErrUnsupportedRecord):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Supported DNS record types are A, AAAA, CNAME, and TXT"})
+		case errors.Is(err, dnsservice.ErrMissingContent):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Content is required"})
+		case errors.Is(err, dnsservice.ErrZoneNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "No matching Cloudflare zone found for hostname"})
+		case errors.Is(err, dnsservice.ErrCloudflareUnconfigured):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Cloudflare API token not configured"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
+		return
+	}
+	c.JSON(http.StatusOK, record)
+}
+
+func getAppDNSRecord(c *gin.Context) {
+	result, err := dnsSvc.GetRecord(c.Request.Context(), c.Param("hostname"))
+	if err != nil {
+		switch {
+		case errors.Is(err, dnsservice.ErrInvalidHostname):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid hostname"})
+		case errors.Is(err, dnsservice.ErrRecordAmbiguous):
+			c.JSON(http.StatusConflict, gin.H{"error": "Multiple DNS records found for hostname"})
+		case errors.Is(err, dnsservice.ErrCloudflareUnconfigured):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Cloudflare API token not configured"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func patchAppDNSRecord(c *gin.Context) {
+	var req struct {
+		Content string `json:"content"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	record, err := dnsSvc.UpdateRecordContent(c.Request.Context(), c.Param("hostname"), req.Content)
+	if err != nil {
+		switch {
+		case errors.Is(err, dnsservice.ErrInvalidHostname):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid hostname"})
+		case errors.Is(err, dnsservice.ErrMissingContent):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Content is required"})
+		case errors.Is(err, dnsservice.ErrRecordNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "DNS record not found"})
+		case errors.Is(err, dnsservice.ErrRecordAmbiguous):
+			c.JSON(http.StatusConflict, gin.H{"error": "Multiple DNS records found for hostname"})
+		case errors.Is(err, dnsservice.ErrZoneNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "No matching Cloudflare zone found for hostname"})
+		case errors.Is(err, dnsservice.ErrCloudflareUnconfigured):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Cloudflare API token not configured"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
+		return
+	}
+	c.JSON(http.StatusOK, record)
+}
+
 func listDomains(c *gin.Context) {
 	if cfg.APIToken == "" || cfg.AccountID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Cloudflare API token or account ID not configured"})
@@ -1062,11 +1215,11 @@ func createDNSRecord(c *gin.Context) {
 		req.Type = "CNAME"
 	}
 
-	record, err := cfClient.CreateDNSRecord(c.Request.Context(), req.ZoneID, cloudflare.DNSRecord{
+	record, err := cfClient.CreateDNSRecord(c.Request.Context(), req.ZoneID, cloudflare.DNSRecordInput{
 		Type:    req.Type,
 		Name:    req.Name,
 		Content: req.Content,
-	}, nil)
+	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

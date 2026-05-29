@@ -407,11 +407,12 @@ func (s *Service) applyTunnelDNS(ctx context.Context, id int, zoneID, subdomain,
 	fullDomain := subdomain + "." + apex
 	log.Printf("[DNS] Creating CNAME: %s -> %s.cfargotunnel.com", fullDomain, tunnelUUID)
 	proxied := true
-	record, err := s.CF.CreateDNSRecord(ctx, zoneID, cloudflare.DNSRecord{
+	record, err := s.CF.CreateDNSRecord(ctx, zoneID, cloudflare.DNSRecordInput{
 		Type:    "CNAME",
 		Name:    fullDomain,
 		Content: tunnelUUID + ".cfargotunnel.com",
-	}, &proxied)
+		Proxied: &proxied,
+	})
 	if err != nil {
 		log.Printf("[DNS] ERROR: %v", err)
 		s.logTunnel(id, "error", "DNS CNAME failed: "+err.Error())

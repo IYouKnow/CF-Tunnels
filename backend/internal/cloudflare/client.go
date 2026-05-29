@@ -37,6 +37,17 @@ type DNSRecord struct {
 	Type    string `json:"type"`
 	Name    string `json:"name"`
 	Content string `json:"content"`
+	Proxied *bool  `json:"proxied,omitempty"`
+	TTL     int    `json:"ttl,omitempty"`
+	ZoneID  string `json:"zone_id,omitempty"`
+}
+
+type DNSRecordInput struct {
+	Type    string
+	Name    string
+	Content string
+	Proxied *bool
+	TTL     *int
 }
 
 type ListZonesResult struct {
@@ -396,6 +407,40 @@ func (c *Client) FetchZoneName(ctx context.Context, zoneID string) (string, erro
 	return out.Result.Name, nil
 }
 
+func (c *Client) FindZoneByName(ctx context.Context, zoneName string) (*Zone, error) {
+	zoneName = strings.TrimSpace(strings.ToLower(strings.TrimSuffix(zoneName, ".")))
+	if zoneName == "" {
+		return nil, nil
+	}
+
+	reqURL := fmt.Sprintf("%s/zones?name=%s", baseURL, url.QueryEscape(zoneName))
+	var out struct {
+		Success bool   `json:"success"`
+		Result  []Zone `json:"result"`
+		Errors  []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	_, raw, err := c.doJSON(ctx, http.MethodGet, reqURL, nil, &out)
+	if err != nil {
+		return nil, err
+	}
+	if !out.Success {
+		msg := ""
+		if len(out.Errors) > 0 {
+			msg = out.Errors[0].Message
+		}
+		return nil, fmt.Errorf(firstErrorMessage(raw, "zone lookup failed", msg))
+	}
+	for _, zone := range out.Result {
+		if strings.EqualFold(strings.TrimSpace(zone.Name), zoneName) {
+			z := zone
+			return &z, nil
+		}
+	}
+	return nil, nil
+}
+
 func (c *Client) FindCNAMERecordID(ctx context.Context, zoneID string, fqdn string) (string, error) {
 	if zoneID == "" || fqdn == "" || c.APIToken == "" {
 		return "", nil
@@ -427,14 +472,60 @@ func (c *Client) FindCNAMERecordID(ctx context.Context, zoneID string, fqdn stri
 	return out.Result[0].ID, nil
 }
 
-func (c *Client) CreateDNSRecord(ctx context.Context, zoneID string, record DNSRecord, proxied *bool) (DNSRecord, error) {
-	body := map[string]any{
-		"type":    record.Type,
-		"name":    record.Name,
-		"content": record.Content,
+func (c *Client) FindDNSRecords(ctx context.Context, zoneID string, fqdn string, recordType string) ([]DNSRecord, error) {
+	if zoneID == "" || fqdn == "" || c.APIToken == "" {
+		return []DNSRecord{}, nil
 	}
-	if proxied != nil {
-		body["proxied"] = *proxied
+	values := url.Values{}
+	values.Set("name", fqdn)
+	if strings.TrimSpace(recordType) != "" {
+		values.Set("type", strings.ToUpper(strings.TrimSpace(recordType)))
+	}
+
+	var out struct {
+		Success bool        `json:"success"`
+		Result  []DNSRecord `json:"result"`
+		Errors  []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	_, raw, err := c.doJSON(ctx, http.MethodGet, fmt.Sprintf("%s/zones/%s/dns_records?%s", baseURL, zoneID, values.Encode()), nil, &out)
+	if err != nil {
+		return nil, err
+	}
+	if !out.Success {
+		msg := ""
+		if len(out.Errors) > 0 {
+			msg = out.Errors[0].Message
+		}
+		return nil, fmt.Errorf(firstErrorMessage(raw, "dns lookup failed", msg))
+	}
+	if out.Result == nil {
+		return []DNSRecord{}, nil
+	}
+	return out.Result, nil
+}
+
+func (c *Client) FindDNSRecord(ctx context.Context, zoneID string, fqdn string, recordType string) (*DNSRecord, error) {
+	records, err := c.FindDNSRecords(ctx, zoneID, fqdn, recordType)
+	if err != nil || len(records) == 0 {
+		return nil, err
+	}
+	record := records[0]
+	return &record, nil
+}
+
+func (c *Client) CreateDNSRecord(ctx context.Context, zoneID string, input DNSRecordInput) (DNSRecord, error) {
+	body := map[string]any{
+		"type":    input.Type,
+		"name":    input.Name,
+		"content": input.Content,
+	}
+	if input.Proxied != nil {
+		body["proxied"] = *input.Proxied
+	}
+	if input.TTL != nil {
+		body["ttl"] = *input.TTL
 	}
 
 	var out struct {
@@ -454,6 +545,40 @@ func (c *Client) CreateDNSRecord(ctx context.Context, zoneID string, record DNSR
 			msg = out.Errors[0].Message
 		}
 		return DNSRecord{}, fmt.Errorf(firstErrorMessage(raw, "DNS record create failed", msg))
+	}
+	return out.Result, nil
+}
+
+func (c *Client) UpdateDNSRecord(ctx context.Context, zoneID string, recordID string, input DNSRecordInput) (DNSRecord, error) {
+	body := map[string]any{
+		"type":    input.Type,
+		"name":    input.Name,
+		"content": input.Content,
+	}
+	if input.Proxied != nil {
+		body["proxied"] = *input.Proxied
+	}
+	if input.TTL != nil {
+		body["ttl"] = *input.TTL
+	}
+
+	var out struct {
+		Success bool      `json:"success"`
+		Result  DNSRecord `json:"result"`
+		Errors  []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	_, raw, err := c.doJSON(ctx, http.MethodPut, fmt.Sprintf("%s/zones/%s/dns_records/%s", baseURL, zoneID, recordID), body, &out)
+	if err != nil {
+		return DNSRecord{}, err
+	}
+	if !out.Success {
+		msg := ""
+		if len(out.Errors) > 0 {
+			msg = out.Errors[0].Message
+		}
+		return DNSRecord{}, fmt.Errorf(firstErrorMessage(raw, "DNS record update failed", msg))
 	}
 	return out.Result, nil
 }
