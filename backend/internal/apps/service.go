@@ -61,7 +61,7 @@ type CreateAppInput struct {
 
 type CreateAppTokenInput struct {
 	Name      string     `json:"name"`
-	Scopes    []string   `json:"scopes"`
+	Scopes    ScopeList  `json:"scopes"`
 	ExpiresAt *time.Time `json:"expiresAt"`
 }
 
@@ -118,21 +118,9 @@ func GenerateToken() (string, string, error) {
 }
 
 func scopesToJSON(scopes []string) (string, error) {
-	if scopes == nil {
-		scopes = []string{}
-	}
-	normalized := make([]string, 0, len(scopes))
-	seen := make(map[string]struct{}, len(scopes))
-	for _, scope := range scopes {
-		scope = strings.TrimSpace(scope)
-		if scope == "" {
-			continue
-		}
-		if _, ok := seen[scope]; ok {
-			continue
-		}
-		seen[scope] = struct{}{}
-		normalized = append(normalized, scope)
+	normalized, err := ValidateScopes(scopes)
+	if err != nil {
+		return "", err
 	}
 	b, err := json.Marshal(normalized)
 	if err != nil {
@@ -149,7 +137,7 @@ func scopesFromJSON(raw string) []string {
 	if err := json.Unmarshal([]byte(raw), &scopes); err != nil {
 		return []string{}
 	}
-	return scopes
+	return NormalizeScopes(scopes)
 }
 
 func nullableTime(v sql.NullTime) *time.Time {
@@ -285,7 +273,7 @@ func (s *Service) CreateToken(ctx context.Context, appID int64, input CreateAppT
 	if input.Name == "" {
 		return CreatedToken{}, fmt.Errorf("token name is required")
 	}
-	scopesJSON, err := scopesToJSON(input.Scopes)
+	scopesJSON, err := scopesToJSON([]string(input.Scopes))
 	if err != nil {
 		return CreatedToken{}, err
 	}

@@ -63,7 +63,10 @@
                   <div class="token-prefix">{{ token.tokenPrefix }}</div>
                 </div>
                 <div class="token-meta">
-                  <div class="token-scopes">{{ token.scopes.join(', ') || 'No scopes' }}</div>
+                  <div class="token-scopes">
+                    <span v-if="!token.scopes.length" class="scope-chip empty">No scopes</span>
+                    <span v-for="scope in token.scopes" :key="scope" class="scope-chip">{{ scope }}</span>
+                  </div>
                   <div class="token-status">
                     <span v-if="token.revokedAt" class="badge error">Revoked</span>
                     <span v-else-if="token.expiresAt && new Date(token.expiresAt) < new Date()" class="badge error">Expired</span>
@@ -118,8 +121,23 @@
           </div>
           <div class="form-group">
             <label>Scopes</label>
-            <input v-model="newToken.scopes" type="text" placeholder="resources:read" />
-            <small>Comma-separated. Example: resources:read</small>
+            <div class="scope-presets">
+              <button type="button" class="btn-secondary btn-preset" @click="applyScopePreset(['resources:read', 'dns:read'])">Read only</button>
+              <button type="button" class="btn-secondary btn-preset" @click="applyScopePreset(['resources:read', 'dns:read', 'dns:create', 'dns:update'])">DNS manager</button>
+              <button type="button" class="btn-secondary btn-preset" @click="applyScopePreset([])">Clear</button>
+            </div>
+            <div class="scope-selector">
+              <label v-for="scope in scopeOptions" :key="scope.value" class="scope-option">
+                <input v-model="newToken.scopes" type="checkbox" :value="scope.value" />
+                <div class="scope-copy">
+                  <div class="scope-heading">
+                    <strong>{{ scope.value }}</strong>
+                    <span>{{ scope.label }}</span>
+                  </div>
+                  <small>{{ scope.description }}</small>
+                </div>
+              </label>
+            </div>
           </div>
           <div class="form-group">
             <label>Expires At</label>
@@ -139,6 +157,7 @@
 <script>
 import { ref, onMounted } from 'vue'
 import api from '../api'
+import { APP_SCOPE_OPTIONS, APP_SCOPE_PRESETS } from '../constants/appScopes'
 
 export default {
   name: 'Apps',
@@ -153,6 +172,7 @@ export default {
     const appError = ref('')
     const tokenError = ref('')
     const tokenReveal = ref(null)
+    const scopeOptions = APP_SCOPE_OPTIONS
 
     const newApp = ref({
       name: '',
@@ -162,7 +182,7 @@ export default {
 
     const newToken = ref({
       name: '',
-      scopes: 'resources:read',
+      scopes: [...APP_SCOPE_PRESETS.readOnly],
       expiresAt: ''
     })
 
@@ -171,6 +191,10 @@ export default {
       const date = new Date(value)
       if (isNaN(date.getTime())) return 'unknown'
       return date.toLocaleString()
+    }
+
+    const applyScopePreset = (preset) => {
+      newToken.value.scopes = [...preset]
     }
 
     const loadApps = async () => {
@@ -233,12 +257,12 @@ export default {
       try {
         const created = await api.createAppToken(selectedApp.value.id, {
           name: newToken.value.name,
-          scopes: newToken.value.scopes.split(',').map(scope => scope.trim()).filter(Boolean),
+          scopes: [...newToken.value.scopes],
           expiresAt: newToken.value.expiresAt ? new Date(newToken.value.expiresAt).toISOString() : null
         })
         tokenReveal.value = created
         showCreateToken.value = false
-        newToken.value = { name: '', scopes: 'resources:read', expiresAt: '' }
+        newToken.value = { name: '', scopes: [...APP_SCOPE_PRESETS.readOnly], expiresAt: '' }
         await loadTokens(selectedApp.value.id)
       } catch (e) {
         tokenError.value = e.response?.data?.error || 'Failed to create token'
@@ -277,7 +301,9 @@ export default {
       appError,
       tokenError,
       tokenReveal,
+      scopeOptions,
       formatTime,
+      applyScopePreset,
       selectApp,
       submitCreateApp,
       submitCreateToken,
@@ -394,6 +420,76 @@ export default {
   justify-content: space-between;
   gap: 1rem;
   align-items: center;
+}
+
+.token-scopes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.scope-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.28rem 0.65rem;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(59, 130, 246, 0.24);
+  color: var(--text-primary);
+  font-size: 0.82rem;
+}
+
+.scope-chip.empty {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-secondary);
+}
+
+.scope-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.9rem;
+}
+
+.btn-preset {
+  padding: 0.45rem 0.8rem;
+}
+
+.scope-selector {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.scope-option {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-start;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-tertiary);
+  cursor: pointer;
+}
+
+.scope-option input {
+  margin-top: 0.15rem;
+}
+
+.scope-copy {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.scope-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+}
+
+.scope-heading span,
+.scope-copy small {
+  color: var(--text-secondary);
 }
 
 .token-meta,
