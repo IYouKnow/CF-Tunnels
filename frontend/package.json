@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@lucide/vue": "^1.21.0",
     "vue": "^3.4.15",
     "vue-router": "^4.2.5",
     "axios": "^1.6.5"

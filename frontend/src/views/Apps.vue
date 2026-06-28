@@ -3,7 +3,7 @@
     <div class="page-header">
       <div class="header-left">
         <h2>Registered Apps</h2>
-        <p class="subtitle">Manage app identities and one-time API tokens for future CF Tunnels integrations</p>
+        <p class="subtitle">Manage app identities and API tokens for integrations</p>
       </div>
       <button class="btn-primary" @click="showCreateApp = true">+ New App</button>
     </div>
@@ -21,8 +21,11 @@
             :class="['app-item', { active: selectedApp && selectedApp.id === app.id }]"
             @click="selectApp(app)"
           >
-            <div class="app-name">{{ app.name }}</div>
-            <div class="app-slug">{{ app.slug }}</div>
+            <div class="app-icon">{{ app.name.charAt(0).toUpperCase() }}</div>
+            <div class="app-meta">
+              <div class="app-name">{{ app.name }}</div>
+              <div class="app-slug">{{ app.slug }}</div>
+            </div>
           </button>
         </div>
       </div>
@@ -30,26 +33,31 @@
       <div class="card app-detail-card">
         <div v-if="!selectedApp" class="empty">Select an app to view details and tokens.</div>
         <template v-else>
-          <div class="card-header detail-header">
-            <div>
+          <div class="detail-header">
+            <div class="detail-heading">
               <div class="detail-title">{{ selectedApp.name }}</div>
               <div class="detail-slug">{{ selectedApp.slug }}</div>
             </div>
-            <button class="btn-secondary" @click="deleteSelectedApp">Delete App</button>
+            <button class="btn-action danger" @click="deleteSelectedApp">Delete</button>
           </div>
           <div class="detail-body">
-            <p class="detail-description">{{ selectedApp.description || 'No description provided.' }}</p>
+            <p class="detail-description">{{ selectedApp.description || 'No description provided' }}</p>
 
             <div v-if="tokenReveal" class="token-reveal">
-              <strong>Copy this token now.</strong>
-              <p>This plaintext token will only be shown once.</p>
-              <code>{{ tokenReveal.token }}</code>
+              <div class="reveal-header">
+                <div class="reveal-heading">Token Created</div>
+                <button type="button" class="reveal-close" @click="tokenReveal = null" aria-label="Close"><X :size="16" /></button>
+              </div>
+              <p class="reveal-sub">Copy this token now. It will only be shown once.</p>
+              <div class="reveal-token-row">
+                <code class="reveal-token">{{ tokenReveal.token }}<button type="button" class="reveal-copy" :class="{ copied }" @click="copyToken" title="Copy to clipboard"><Copy v-if="!copied" :size="15" /><Check v-else :size="15" /></button></code>
+              </div>
             </div>
 
-            <div class="token-toolbar">
+            <div class="token-section-header">
               <div>
-                <div class="section-title">App Tokens</div>
-                <div class="section-subtitle">Use a read-only token first while the internal app API is being built out.</div>
+                <div class="section-title">Tokens</div>
+                <div class="section-subtitle">Scoped API tokens for this app</div>
               </div>
               <button class="btn-primary" @click="showCreateToken = true">+ New Token</button>
             </div>
@@ -58,27 +66,29 @@
             <div v-else-if="tokens.length === 0" class="empty">No tokens created yet.</div>
             <div v-else class="token-list">
               <div v-for="token in tokens" :key="token.id" class="token-item">
-                <div class="token-main">
-                  <div class="token-name">{{ token.name }}</div>
-                  <div class="token-prefix">{{ token.tokenPrefix }}</div>
+                <div class="token-primary">
+                  <div class="token-info">
+                    <div class="token-name">{{ token.name }}</div>
+                    <code class="token-prefix">{{ token.tokenPrefix }}<button type="button" class="prefix-copy" @click="copyPrefix(token.tokenPrefix, token.id)" title="Copy prefix"><Check v-if="copiedPrefix === token.id" :size="12" /><Copy v-else :size="12" /></button></code>
+                  </div>
+                  <button v-if="!token.revokedAt" class="btn-action danger sm" @click="revokeToken(token.id)">Revoke</button>
+                  <button v-else class="btn-action danger sm" @click="deleteToken(token.id)">Delete</button>
                 </div>
-                <div class="token-meta">
+                <div class="token-secondary">
                   <div class="token-scopes">
-                    <span v-if="!token.scopes.length" class="scope-chip empty">No scopes</span>
+                    <span v-if="!token.scopes.length" class="no-scopes">No scopes</span>
                     <span v-for="scope in token.scopes" :key="scope" class="scope-chip">{{ scope }}</span>
                   </div>
-                  <div class="token-status">
+                  <div class="token-secondary-end">
                     <span v-if="token.revokedAt" class="badge error">Revoked</span>
                     <span v-else-if="token.expiresAt && new Date(token.expiresAt) < new Date()" class="badge error">Expired</span>
                     <span v-else class="badge running">Active</span>
+                    <span class="token-date">Created {{ formatTime(token.createdAt) }}</span>
+                    <span class="token-date-sep">·</span>
+                    <span class="token-date">Used {{ formatTime(token.lastUsedAt) }}</span>
+                  </div>
                   </div>
                 </div>
-                <div class="token-actions">
-                  <small>Created {{ formatTime(token.createdAt) }}</small>
-                  <small>Last used {{ formatTime(token.lastUsedAt) }}</small>
-                  <button class="btn-action danger" :disabled="!!token.revokedAt" @click="revokeToken(token.id)">Revoke</button>
-                </div>
-              </div>
             </div>
           </div>
         </template>
@@ -115,9 +125,8 @@
       <div class="modal token-modal">
         <div class="token-modal-header">
           <div>
-            <p class="eyebrow">Scoped access</p>
             <h2>Create Token</h2>
-            <p class="token-modal-subtitle">Choose the exact permissions this token should carry. Only supported app scopes can be selected.</p>
+            <p class="token-modal-subtitle">Choose the permissions this token should carry.</p>
           </div>
           <div class="token-scope-count">{{ newToken.scopes.length }} selected</div>
         </div>
@@ -154,7 +163,7 @@
                 </div>
               </label>
             </div>
-            <p class="scope-footnote">Only supported app permissions can be used here. Tunnel scopes are intentionally excluded for now.</p>
+            <p class="scope-footnote">Only supported app permissions can be used here.</p>
           </div>
           <div class="form-group">
             <label>Expires At</label>
@@ -175,9 +184,11 @@
 import { ref, onMounted } from 'vue'
 import api from '../api'
 import { APP_SCOPE_OPTIONS, APP_SCOPE_PRESETS } from '../constants/appScopes'
+import { X, Copy, Check } from '@lucide/vue'
 
 export default {
   name: 'Apps',
+  components: { X, Copy, Check },
   setup () {
     const apps = ref([])
     const selectedApp = ref(null)
@@ -189,6 +200,8 @@ export default {
     const appError = ref('')
     const tokenError = ref('')
     const tokenReveal = ref(null)
+    const copied = ref(false)
+    const copiedPrefix = ref(null)
     const scopeOptions = APP_SCOPE_OPTIONS
 
     const newApp = ref({
@@ -286,10 +299,31 @@ export default {
       }
     }
 
+    const copyPrefix = (prefix, tokenId) => {
+      navigator.clipboard.writeText(prefix)
+      copiedPrefix.value = tokenId
+      setTimeout(() => { copiedPrefix.value = null }, 1500)
+    }
+
+    const copyToken = () => {
+      if (tokenReveal.value?.token) {
+        navigator.clipboard.writeText(tokenReveal.value.token)
+        copied.value = true
+        setTimeout(() => { copied.value = false }, 1500)
+      }
+    }
+
     const revokeToken = async (tokenId) => {
       if (!selectedApp.value) return
       if (!confirm('Revoke this token? It will stop working immediately.')) return
       await api.revokeAppToken(selectedApp.value.id, tokenId)
+      await loadTokens(selectedApp.value.id)
+    }
+
+    const deleteToken = async (tokenId) => {
+      if (!selectedApp.value) return
+      if (!confirm('Permanently delete this token? This cannot be undone.')) return
+      await api.deleteAppToken(selectedApp.value.id, tokenId)
       await loadTokens(selectedApp.value.id)
     }
 
@@ -306,35 +340,18 @@ export default {
     onMounted(loadApps)
 
     return {
-      apps,
-      selectedApp,
-      tokens,
-      loadingApps,
-      loadingTokens,
-      showCreateApp,
-      showCreateToken,
-      newApp,
-      newToken,
-      appError,
-      tokenError,
-      tokenReveal,
-      scopeOptions,
-      formatTime,
-      applyScopePreset,
-      selectApp,
-      submitCreateApp,
-      submitCreateToken,
-      revokeToken,
-      deleteSelectedApp
+      apps, selectedApp, tokens, loadingApps, loadingTokens,
+      showCreateApp, showCreateToken, newApp, newToken,
+      appError, tokenError,       tokenReveal, copied, copiedPrefix, scopeOptions,
+      formatTime, applyScopePreset, selectApp, copyToken, copyPrefix,
+      submitCreateApp, submitCreateToken, revokeToken, deleteToken, deleteSelectedApp
     }
   }
 }
 </script>
 
 <style scoped>
-.apps-page {
-  max-width: 1400px;
-}
+.apps-page { max-width: 1400px; }
 
 .page-header {
   display: flex;
@@ -344,181 +361,346 @@ export default {
   gap: 1rem;
 }
 
-.header-left h2 {
-  font-size: 1.5rem;
-  font-weight: 600;
-  margin-bottom: 0.25rem;
-}
-
-.subtitle {
-  color: var(--text-secondary);
-  font-size: 0.9rem;
-}
+.header-left h2 { font-size: 1.5rem; font-weight: 600; margin-bottom: 0.25rem; }
+.subtitle { color: var(--text-secondary); font-size: 0.9rem; }
 
 .apps-grid {
   display: grid;
-  grid-template-columns: 320px 1fr;
+  grid-template-columns: 280px 1fr;
   gap: 1.5rem;
+  align-items: start;
 }
 
-.app-list {
-  display: flex;
-  flex-direction: column;
-}
+.app-list { display: flex; flex-direction: column; }
 
 .app-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
   text-align: left;
-  padding: 1rem 1.25rem;
+  padding: 0.75rem 1rem;
   background: transparent;
   border: none;
   border-bottom: 1px solid var(--border);
   color: var(--text-primary);
   cursor: pointer;
+  transition: background 0.12s;
 }
 
-.app-item:hover,
-.app-item.active {
-  background: var(--bg-tertiary);
+.app-item:last-child { border-bottom: none; }
+.app-item:hover { background: var(--bg-tertiary); }
+.app-item.active { background: var(--accent-subtle); }
+
+.app-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-size: 0.8rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
 }
 
-.app-name,
-.detail-title {
-  font-weight: 600;
-}
+.app-meta { min-width: 0; }
 
-.app-slug,
-.detail-slug,
-.section-subtitle,
-.detail-description,
-.token-prefix,
-.token-actions small {
-  color: var(--text-secondary);
-}
+.app-name { font-size: 0.875rem; font-weight: 500; }
+.app-slug { font-size: 0.75rem; color: var(--text-muted); }
 
 .detail-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--border);
 }
 
-.detail-body {
-  padding: 1.25rem;
-}
+.detail-title { font-size: 1rem; font-weight: 600; }
+.detail-slug { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.125rem; }
 
-.token-toolbar {
+.detail-body { padding: 1.25rem; }
+.detail-description { color: var(--text-secondary); font-size: 0.875rem; margin-bottom: 1.5rem; }
+
+.token-section-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 1rem;
-  margin: 1.5rem 0 1rem;
+  margin-bottom: 1rem;
 }
 
-.section-title {
-  font-weight: 600;
-}
+.section-title { font-size: 0.9rem; font-weight: 600; }
+.section-subtitle { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.125rem; }
 
-.token-list {
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-}
+.token-list { display: flex; flex-direction: column; gap: 0.5rem; }
 
 .token-item {
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 1rem;
+  border-radius: var(--radius-md);
+  padding: 0.75rem 1rem;
+  background: var(--bg-elevated);
+}
+
+.token-primary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.token-info {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.token-name { font-size: 0.875rem; font-weight: 600; white-space: nowrap; }
+.token-prefix {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-family: ui-monospace, monospace;
+  position: relative;
+}
+
+.prefix-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text-muted);
+  padding: 0.125rem;
+  border-radius: 4px;
+  cursor: pointer;
+  line-height: 1;
+  transition: all 0.12s;
+}
+
+.prefix-copy:hover {
+  color: var(--text-primary);
+  border-color: var(--border);
   background: var(--bg-tertiary);
 }
 
-.token-main,
-.token-meta,
-.token-actions {
+
+
+.token-secondary {
   display: flex;
   justify-content: space-between;
-  gap: 1rem;
   align-items: center;
+  gap: 1rem;
 }
 
 .token-scopes {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
+  gap: 0.25rem;
+  min-width: 0;
 }
 
 .scope-chip {
   display: inline-flex;
   align-items: center;
-  padding: 0.28rem 0.65rem;
+  padding: 0.15rem 0.45rem;
   border-radius: 999px;
-  background: rgba(59, 130, 246, 0.16);
-  border: 1px solid rgba(59, 130, 246, 0.28);
-  color: #dbeafe;
-  font-size: 0.82rem;
+  background: var(--accent-subtle);
+  border: 1px solid rgba(243, 128, 32, 0.15);
+  color: var(--accent);
+  font-size: 0.7rem;
+  font-weight: 500;
+  white-space: nowrap;
 }
 
-.scope-chip.empty {
-  background: transparent;
-  border-color: var(--border);
-  color: var(--text-secondary);
-}
+.no-scopes { color: var(--text-muted); font-size: 0.75rem; }
 
-.scope-presets {
+.token-secondary-end {
   display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
+  align-items: center;
+  gap: 0.375rem;
+  flex-shrink: 0;
 }
+
+.token-date {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.token-date-sep { color: var(--border-light); font-size: 0.7rem; }
+
+.btn-action.sm {
+  padding: 0.2rem 0.5rem;
+  font-size: 0.7rem;
+  line-height: 1.4;
+}
+
+.token-reveal {
+  margin-bottom: 1.5rem;
+  padding: 1rem;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-md);
+  background: var(--accent-subtle);
+}
+
+.reveal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.reveal-heading { font-size: 0.9rem; font-weight: 600; }
+
+.reveal-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0.25rem;
+  border-radius: var(--radius-sm);
+  line-height: 1;
+}
+
+.reveal-close:hover { color: var(--text-primary); background: var(--bg-tertiary); }
+
+.reveal-sub { font-size: 0.8rem; color: var(--text-secondary); margin-top: 0.25rem; }
+
+.reveal-token-row {
+  position: relative;
+  margin-top: 0.75rem;
+}
+
+.reveal-token {
+  display: block;
+  padding: 0.75rem 3rem 0.75rem 0.75rem;
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+  position: relative;
+}
+
+.reveal-copy {
+  position: absolute;
+  top: 50%;
+  right: 0.625rem;
+  transform: translateY(-50%);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.25rem 0.375rem;
+  font-size: 0.875rem;
+  cursor: pointer;
+  line-height: 1;
+  color: #fff;
+  transition: background 0.12s;
+}
+
+.reveal-copy:hover { background: var(--border); }
+.reveal-copy.copied { border-color: var(--success, #4ade80); background: rgba(74, 222, 128, 0.15); }
+
+/* Create Token modal */
+.token-modal { max-width: 600px; }
+
+.token-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.token-modal-header h2 { margin-bottom: 0.25rem; }
+.token-modal-subtitle { color: var(--text-secondary); font-size: 0.85rem; }
+
+.token-scope-count {
+  padding: 0.35rem 0.75rem;
+  border-radius: 999px;
+  background: var(--accent-subtle);
+  border: 1px solid rgba(243, 128, 32, 0.2);
+  color: var(--accent);
+  font-size: 0.85rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.scope-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.scope-panel-header label { margin-bottom: 0; }
+
+.scope-presets { display: flex; gap: 0.375rem; }
 
 .preset-pill {
-  padding: 0.45rem 0.8rem;
-  border: 1px solid rgba(148, 163, 184, 0.24);
+  padding: 0.25rem 0.625rem;
+  border: 1px solid var(--border);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text-primary);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
   cursor: pointer;
-  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+  transition: all 0.12s;
 }
 
 .preset-pill:hover {
-  border-color: rgba(45, 212, 191, 0.4);
-  background: rgba(45, 212, 191, 0.08);
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-subtle);
 }
 
-.preset-clear {
-  color: var(--text-secondary);
+.preset-clear { color: var(--text-muted); }
+
+.selected-scope-strip {
+  margin-bottom: 0.75rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-tertiary);
 }
 
-.scope-selector {
-  display: grid;
-  gap: 0.75rem;
-}
+.selected-scope-title { font-size: 0.8rem; font-weight: 600; margin-bottom: 0.5rem; }
+.selected-scope-empty { color: var(--text-muted); font-size: 0.8rem; }
+
+.scope-selector { display: grid; gap: 0.5rem; }
 
 .scope-option {
   display: flex;
-  gap: 0.85rem;
+  gap: 0.75rem;
   align-items: center;
-  padding: 1rem;
+  padding: 0.75rem;
   border: 1px solid var(--border);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.03);
+  border-radius: var(--radius-md);
+  background: transparent;
   cursor: pointer;
-  transition: border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
+  transition: all 0.12s;
 }
 
-.scope-option:hover {
-  border-color: rgba(59, 130, 246, 0.32);
-  background: rgba(59, 130, 246, 0.05);
-}
+.scope-option:hover { border-color: var(--border-light); background: var(--bg-tertiary); }
 
 .scope-option.selected {
-  border-color: rgba(45, 212, 191, 0.45);
-  background: rgba(45, 212, 191, 0.08);
-  box-shadow: inset 0 0 0 1px rgba(45, 212, 191, 0.12);
+  border-color: var(--accent);
+  background: var(--accent-subtle);
 }
 
 .scope-option input {
   width: 16px;
   height: 16px;
-  accent-color: #14b8a6;
+  accent-color: var(--accent);
   flex: 0 0 auto;
 }
 
@@ -531,178 +713,28 @@ export default {
   width: 100%;
 }
 
-.scope-option-copy {
-  display: grid;
-  gap: 0.3rem;
-  min-width: 0;
-}
-
-.scope-code,
-.scope-option-copy small {
-  color: var(--text-secondary);
-}
+.scope-option-copy { min-width: 0; }
+.scope-option-copy strong { font-size: 0.85rem; display: block; }
+.scope-option-copy small { color: var(--text-muted); font-size: 0.75rem; }
 
 .scope-code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 0.78rem;
-  padding: 0.22rem 0.45rem;
+  font-family: ui-monospace, monospace;
+  font-size: 0.7rem;
+  padding: 0.15rem 0.4rem;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
   flex: 0 0 auto;
 }
 
-.token-meta,
-.token-actions {
-  margin-top: 0.5rem;
-}
+.scope-footnote { margin-top: 0.75rem; color: var(--text-muted); font-size: 0.8rem; }
 
-.token-actions {
-  flex-wrap: wrap;
-}
-
-.token-reveal {
-  margin-top: 1rem;
-  padding: 1rem;
-  border: 1px solid var(--warning);
-  background: rgba(245, 158, 11, 0.08);
-  border-radius: 10px;
-}
-
-.token-reveal code {
-  display: block;
-  margin-top: 0.75rem;
-  padding: 0.75rem;
-  border-radius: 8px;
-  background: var(--bg-primary);
-  overflow-wrap: anywhere;
-}
-
-.token-modal {
-  width: min(900px, 96vw);
-  max-width: min(900px, 96vw);
-  overflow-x: hidden;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(243, 128, 32, 0.7) rgba(255, 255, 255, 0.05);
-}
-
-.token-modal::-webkit-scrollbar {
-  width: 12px;
-}
-
-.token-modal::-webkit-scrollbar-track {
-  background: rgba(255, 255, 255, 0.04);
-  border-radius: 999px;
-}
-
-.token-modal::-webkit-scrollbar-thumb {
-  background: linear-gradient(180deg, rgba(243, 128, 32, 0.9), rgba(255, 157, 77, 0.85));
-  border-radius: 999px;
-  border: 2px solid transparent;
-  background-clip: padding-box;
-}
-
-.token-modal::-webkit-scrollbar-thumb:hover {
-  background: linear-gradient(180deg, rgba(255, 157, 77, 0.95), rgba(243, 128, 32, 0.95));
-  border: 2px solid transparent;
-  background-clip: padding-box;
-}
-
-.token-modal-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 1rem;
-  margin-bottom: 1.2rem;
-}
-
-.eyebrow {
-  margin: 0 0 0.35rem;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-size: 0.72rem;
-  font-weight: 700;
-  color: #0f766e;
-}
-
-.token-modal-subtitle {
-  margin: 0.35rem 0 0;
-  color: var(--text-secondary);
-  max-width: 52ch;
-}
-
-.token-scope-count {
-  padding: 0.5rem 0.85rem;
-  border-radius: 999px;
-  background: rgba(45, 212, 191, 0.08);
-  border: 1px solid rgba(45, 212, 191, 0.18);
-  color: #99f6e4;
-  font-size: 0.88rem;
-  font-weight: 600;
-}
-
-.token-scope-panel {
-  margin-bottom: 0;
-}
-
-.scope-panel-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 1rem;
-  margin-bottom: 0.85rem;
-}
-
-.selected-scope-strip {
-  margin-bottom: 0.9rem;
-  padding: 0.9rem 1rem;
-  border: 1px solid rgba(148, 163, 184, 0.16);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.02);
-}
-
-.selected-scope-title {
-  margin-bottom: 0.55rem;
-  font-size: 0.88rem;
-  font-weight: 600;
-}
-
-.selected-scope-empty {
-  margin: 0;
-  color: var(--text-secondary);
-  font-size: 0.9rem;
-}
-
-.scope-footnote {
-  margin: 0.85rem 0 0;
-  color: var(--text-secondary);
-  font-size: 0.84rem;
-  line-height: 1.45;
-}
-
-.error-msg {
-  color: var(--error);
-  margin-top: 0.25rem;
-}
+.error-msg { color: var(--error); margin-top: 0.25rem; font-size: 0.85rem; }
 
 @media (max-width: 960px) {
-  .apps-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .token-main,
-  .token-meta,
-  .token-actions,
-  .detail-header,
-  .token-toolbar {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-
-  .token-modal-header,
-  .scope-panel-header,
-  .scope-option-main {
-    flex-direction: column;
-    align-items: flex-start;
-  }
+  .apps-grid { grid-template-columns: 1fr; }
+  .detail-header, .token-section-header { flex-direction: column; align-items: flex-start; }
+  .token-secondary { flex-direction: column; align-items: flex-start; }
+  .token-modal-header, .scope-panel-header, .scope-option-main { flex-direction: column; align-items: flex-start; }
 }
 </style>

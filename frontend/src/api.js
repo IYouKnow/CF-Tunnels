@@ -66,5 +66,6 @@ export default {
   deleteApp: (id) => client.delete(`/api/apps/${id}`).then(r => r.data),
   getAppTokens: (id) => client.get(`/api/apps/${id}/tokens`).then(r => r.data),
   createAppToken: (id, data) => client.post(`/api/apps/${id}/tokens`, data).then(r => r.data),
-  revokeAppToken: (id, tokenId) => client.delete(`/api/apps/${id}/tokens/${tokenId}`).then(r => r.data)
+  revokeAppToken: (id, tokenId) => client.delete(`/api/apps/${id}/tokens/${tokenId}`).then(r => r.data),
+  deleteAppToken: (id, tokenId) => client.delete(`/api/apps/${id}/tokens/${tokenId}/purge`).then(r => r.data)
 }

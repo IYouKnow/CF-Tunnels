@@ -115,7 +115,7 @@
 </template>
 
 <script>
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed } from 'vue'
 import api from '../api'
 import { showToast } from '../toast'
 
@@ -277,9 +277,16 @@ export default {
       }
     }
 
-    onMounted(() => {
-      loadTunnels()
+    let pollTimer
+
+    onMounted(async () => {
       loadDomains()
+      await syncTunnels()
+      pollTimer = setInterval(loadTunnels, 60000)
+    })
+
+    onUnmounted(() => {
+      if (pollTimer) clearInterval(pollTimer)
     })
 
     // Close dropdown on outside click

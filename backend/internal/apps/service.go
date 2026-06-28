@@ -329,6 +329,21 @@ func (s *Service) RevokeToken(ctx context.Context, appID, tokenID int64) error {
 	return nil
 }
 
+func (s *Service) DeleteToken(ctx context.Context, appID, tokenID int64) error {
+	if _, err := s.GetApp(ctx, appID); err != nil {
+		return err
+	}
+	res, err := s.DB.ExecContext(ctx, "DELETE FROM app_tokens WHERE id = ? AND app_id = ?", tokenID, appID)
+	if err != nil {
+		return err
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return ErrTokenNotFound
+	}
+	return nil
+}
+
 func hasScope(scopes []string, required string) bool {
 	for _, scope := range scopes {
 		if scope == required {

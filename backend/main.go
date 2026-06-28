@@ -444,6 +444,7 @@ func main() {
 	r.GET("/api/apps/:id/tokens", listAppTokens)
 	r.POST("/api/apps/:id/tokens", createAppToken)
 	r.DELETE("/api/apps/:id/tokens/:tokenId", revokeAppToken)
+	r.DELETE("/api/apps/:id/tokens/:tokenId/purge", deleteAppToken)
 
 	v1 := gin.New()
 	v1.Use(gin.Recovery())
@@ -1046,6 +1047,28 @@ func revokeAppToken(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 	default:
 		c.JSON(http.StatusOK, gin.H{"message": "Token revoked"})
+	}
+}
+
+func deleteAppToken(c *gin.Context) {
+	id, ok := parseIDParam(c, "id")
+	if !ok {
+		return
+	}
+	tokenID, ok := parseIDParam(c, "tokenId")
+	if !ok {
+		return
+	}
+	err := appSvc.DeleteToken(c.Request.Context(), id, tokenID)
+	switch {
+	case errors.Is(err, apps.ErrAppNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "App not found"})
+	case errors.Is(err, apps.ErrTokenNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "Token not found"})
+	case err != nil:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	default:
+		c.JSON(http.StatusOK, gin.H{"message": "Token permanently deleted"})
 	}
 }
 
