@@ -169,8 +169,8 @@ export default {
 
 .toast-container {
   position: fixed;
-  top: 1rem;
-  right: 1rem;
+  bottom: 1.5rem;
+  right: 1.5rem;
   z-index: 9999;
   display: flex;
   flex-direction: column;
@@ -211,7 +211,7 @@ export default {
 }
 
 @keyframes toast-in {
-  from { transform: translateY(-8px) scale(0.97); opacity: 0; }
-  to { transform: translateY(0) scale(1); opacity: 1; }
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
 }
 </style>

@@ -42,9 +42,15 @@
           <span :class="['badge', tunnel.status]">{{ tunnel.status }}</span>
         </div>
         <div class="col-actions">
-          <button v-if="tunnel.status === 'stopped'" class="btn-action success" @click="startTunnel(tunnel.id)">Start</button>
-          <button v-else class="btn-action" @click="stopTunnel(tunnel.id)">Stop</button>
-          <button class="btn-action danger" @click="deleteTunnel(tunnel.id)">Delete</button>
+          <div class="dropdown" @click.stop>
+            <button class="dropdown-trigger" @click="toggleDropdown(tunnel.id)">⋮</button>
+            <div v-if="openDropdown === tunnel.id" class="dropdown-menu" @click="openDropdown = null">
+              <button class="dropdown-item" @click="openEditModal(tunnel)">Edit</button>
+              <button v-if="tunnel.status === 'stopped'" class="dropdown-item" @click="startTunnel(tunnel.id)">Start</button>
+              <button v-else class="dropdown-item" @click="stopTunnel(tunnel.id)">Stop</button>
+              <button class="dropdown-item danger" @click="deleteTunnel(tunnel.id)">Delete</button>
+            </div>
+          </div>
         </div>
       </div>
       <div v-if="tunnels.length === 0" class="empty">No tunnels. Create one to get started.</div>
@@ -89,6 +95,22 @@
         </form>
       </div>
     </div>
+
+    <div v-if="showEditModal" class="modal-overlay" @click.self="showEditModal = false">
+      <div class="modal">
+        <h2>Edit Tunnel</h2>
+        <form @submit.prevent="saveRename">
+          <div class="form-group">
+            <label>Tunnel Name</label>
+            <input v-model="editName" type="text" placeholder="my-tunnel" required />
+          </div>
+          <div class="modal-actions">
+            <button type="button" class="btn-secondary" @click="showEditModal = false">Cancel</button>
+            <button type="submit" class="btn-primary">Save</button>
+          </div>
+        </form>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -103,11 +125,15 @@ export default {
     const tunnels = ref([])
     const domains = ref([])
     const showCreateModal = ref(false)
+    const showEditModal = ref(false)
+    const editTarget = ref(null)
+    const editName = ref('')
     const newTunnel = ref({ name: '', account_id: '', zone_id: '', subdomain: '', address: '' })
     const currentPage = ref(1)
     const perPage = ref(20)
     const totalTunnels = ref(0)
     const syncing = ref(false)
+    const openDropdown = ref(null)
     const searchQuery = ref('')
 
     const totalPages = computed(() => Math.ceil(totalTunnels.value / perPage.value))
@@ -168,6 +194,32 @@ export default {
       }
     }
 
+    const toggleDropdown = (id) => {
+      openDropdown.value = openDropdown.value === id ? null : id
+    }
+
+    const openEditModal = (tunnel) => {
+      editTarget.value = tunnel
+      editName.value = tunnel.name
+      showEditModal.value = true
+    }
+
+    const saveRename = async () => {
+      const name = editName.value.trim()
+      if (!name || !editTarget.value) return
+      const id = editTarget.value.id
+      showEditModal.value = false
+      editTarget.value = null
+      try {
+        await api.updateTunnel(id, { name })
+        loadTunnels()
+        showToast('Tunnel renamed')
+      } catch (e) {
+        showToast(e.response?.data?.error || e.message, 'error')
+        loadTunnels()
+      }
+    }
+
     const nextPage = () => {
       if (currentPage.value < totalPages.value) {
         currentPage.value++
@@ -187,7 +239,6 @@ export default {
         name: newTunnel.value.name,
         account_id: newTunnel.value.account_id,
         zone_id: newTunnel.value.zone_id,
-        // Apex hostname for the zone (e.g. example.com); required for correct DNS CNAME on start.
         domain: selectedDomainName.value,
         subdomain: newTunnel.value.subdomain,
         address: newTunnel.value.address
@@ -198,19 +249,31 @@ export default {
     }
 
     const startTunnel = async (id) => {
-      await api.startTunnel(id)
-      loadTunnels()
+      try {
+        await api.startTunnel(id)
+        loadTunnels()
+      } catch (e) {
+        showToast(e.response?.data?.error || e.message, 'error')
+      }
     }
 
     const stopTunnel = async (id) => {
-      await api.stopTunnel(id)
-      loadTunnels()
+      try {
+        await api.stopTunnel(id)
+        loadTunnels()
+      } catch (e) {
+        showToast(e.response?.data?.error || e.message, 'error')
+      }
     }
 
     const deleteTunnel = async (id) => {
       if (confirm('Are you sure you want to delete this tunnel?')) {
-        await api.deleteTunnel(id)
-        loadTunnels()
+        try {
+          await api.deleteTunnel(id)
+          loadTunnels()
+        } catch (e) {
+          showToast(e.response?.data?.error || e.message, 'error')
+        }
       }
     }
 
@@ -218,11 +281,19 @@ export default {
       loadTunnels()
       loadDomains()
     })
+
+    // Close dropdown on outside click
+    if (typeof window !== 'undefined') {
+      window.addEventListener('click', () => { openDropdown.value = null })
+    }
+
     return { 
       tunnels, 
       filteredTunnels,
       domains, 
-      showCreateModal, 
+      showCreateModal,
+      showEditModal,
+      editName,
       newTunnel, 
       createTunnel, 
       startTunnel, 
@@ -236,7 +307,11 @@ export default {
       prevPage,
       searchQuery,
       syncing,
-      syncTunnels
+      syncTunnels,
+      openDropdown,
+      toggleDropdown,
+      openEditModal,
+      saveRename
     }
   }
 }
@@ -290,7 +365,7 @@ export default {
 
 .table-header {
   display: grid;
-  grid-template-columns: 1.5fr 1.5fr 1.5fr 2fr 100px 140px;
+  grid-template-columns: 1.5fr 1.5fr 1.5fr 2fr 100px 60px;
   gap: 1rem;
   padding: 1rem 1.25rem;
   background: var(--bg-tertiary);
@@ -301,7 +376,7 @@ export default {
 
 .table-row {
   display: grid;
-  grid-template-columns: 1.5fr 1.5fr 1.5fr 2fr 100px 140px;
+  grid-template-columns: 1.5fr 1.5fr 1.5fr 2fr 100px 60px;
   gap: 1rem;
   padding: 1rem 1.25rem;
   align-items: center;
@@ -354,13 +429,64 @@ export default {
 }
 
 .col-actions {
-  display: flex;
-  gap: 0.5rem;
+  position: relative;
 }
 
-.col-actions .btn-action {
-  padding: 0.375rem 0.75rem;
-  font-size: 0.8rem;
+.dropdown-trigger {
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  font-size: 1.25rem;
+  line-height: 1;
+  padding: 0.25rem 0.5rem;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s;
+  letter-spacing: 2px;
+}
+
+.dropdown-trigger:hover {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+  border-color: var(--border);
+}
+
+.dropdown-menu {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  min-width: 120px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+  z-index: 20;
+  overflow: hidden;
+}
+
+.dropdown-item {
+  display: block;
+  width: 100%;
+  padding: 0.5rem 1rem;
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.dropdown-item:hover {
+  background: var(--bg-tertiary);
+}
+
+.dropdown-item.danger {
+  color: var(--error);
+}
+
+.dropdown-item.danger:hover {
+  background: rgba(239, 68, 68, 0.1);
 }
 
 .table-footer {

@@ -153,6 +153,34 @@ func (s *Service) CreateTunnel(ctx context.Context, input CreateTunnelInput) (Cr
 	return CreateTunnelResult{ID: id, Name: input.Name}, nil
 }
 
+func (s *Service) UpdateTunnelName(ctx context.Context, id int, newName string) error {
+	var uuid string
+	var accountID string
+	err := s.DB.QueryRow("SELECT COALESCE(uuid,''), COALESCE(account_id,'') FROM tunnels WHERE id = ?", id).Scan(&uuid, &accountID)
+	if err == sql.ErrNoRows {
+		return ErrTunnelNotFound
+	}
+	if err != nil {
+		return err
+	}
+
+	// If the tunnel exists on Cloudflare, rename it there first.
+	if uuid != "" && s.HasAPIToken {
+		acc := accountID
+		if acc == "" {
+			acc = s.DefaultAccountID
+		}
+		if acc != "" {
+			if err := s.CF.UpdateTunnelName(ctx, acc, uuid, newName); err != nil {
+				return fmt.Errorf("cloudflare rename failed: %w", err)
+			}
+		}
+	}
+
+	_, err = s.DB.Exec("UPDATE tunnels SET name = ? WHERE id = ?", newName, id)
+	return err
+}
+
 func (s *Service) SyncTunnels(ctx context.Context) (imported int, updated int, err error) {
 	if !s.HasAPIToken {
 		return 0, 0, fmt.Errorf("Cloudflare API token not configured")
@@ -278,6 +306,15 @@ func (s *Service) StartTunnel(ctx context.Context, id int) (StartTunnelResult, e
 	}
 	if t.Status == "running" && t.PID > 0 {
 		return StartTunnelResult{}, &BadRequestError{Message: "Tunnel already running"}
+	}
+
+	if t.Address != "" {
+		var conflictID int
+		var conflictName string
+		err := s.DB.QueryRow("SELECT id, name FROM tunnels WHERE address = ? AND status = 'running' AND id != ?", t.Address, id).Scan(&conflictID, &conflictName)
+		if err == nil {
+			return StartTunnelResult{}, &BadRequestError{Message: fmt.Sprintf("Cannot start — address %q is already in use by tunnel %q", t.Address, conflictName)}
+		}
 	}
 
 	if t.UUID == "" {

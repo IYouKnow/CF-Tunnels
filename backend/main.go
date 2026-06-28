@@ -419,6 +419,7 @@ func main() {
 	r.GET("/api/tunnels", listTunnels)
 	r.POST("/api/tunnels", createTunnel)
 	r.GET("/api/tunnels/:id", getTunnel)
+	r.PUT("/api/tunnels/:id", updateTunnel)
 	r.DELETE("/api/tunnels/:id", deleteTunnel)
 	r.POST("/api/tunnels/sync", syncTunnels)
 	r.POST("/api/tunnels/:id/start", startTunnel)
@@ -662,6 +663,30 @@ func createTunnel(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, gin.H{"id": result.ID, "name": result.Name})
+}
+
+func updateTunnel(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tunnel ID"})
+		return
+	}
+	var req struct {
+		Name string `json:"name" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := tunnelSvc.UpdateTunnelName(c.Request.Context(), id, req.Name); err != nil {
+		if errors.Is(err, tunnels.ErrTunnelNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Tunnel not found"})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Tunnel renamed"})
 }
 
 func syncTunnels(c *gin.Context) {

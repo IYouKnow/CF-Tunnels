@@ -44,6 +44,7 @@ export default {
   getTunnel: (id) => client.get(`/api/tunnels/${id}`).then(r => r.data),
   syncTunnels: () => client.post('/api/tunnels/sync').then(r => r.data),
   createTunnel: (data) => client.post('/api/tunnels', data).then(r => r.data),
+  updateTunnel: (id, data) => client.put(`/api/tunnels/${id}`, data).then(r => r.data),
   deleteTunnel: (id) => client.delete(`/api/tunnels/${id}`).then(r => r.data),
   startTunnel: (id) => client.post(`/api/tunnels/${id}/start`).then(r => r.data),
   stopTunnel: (id) => client.post(`/api/tunnels/${id}/stop`).then(r => r.data),

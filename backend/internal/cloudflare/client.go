@@ -328,6 +328,35 @@ func (c *Client) DeleteTunnel(ctx context.Context, accountID string, tunnelID st
 	return lastErr
 }
 
+func (c *Client) UpdateTunnelName(ctx context.Context, accountID string, tunnelID string, newName string) error {
+	if accountID == "" || tunnelID == "" {
+		return fmt.Errorf("account ID and tunnel ID are required")
+	}
+	if c.APIToken == "" {
+		return fmt.Errorf("API token is empty")
+	}
+	var out struct {
+		Success bool `json:"success"`
+		Errors  []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	_, raw, err := c.doJSON(ctx, http.MethodPatch, fmt.Sprintf("%s/accounts/%s/cfd_tunnel/%s", baseURL, accountID, tunnelID), map[string]string{
+		"name": sanitizeTunnelNameForCF(newName),
+	}, &out)
+	if err != nil {
+		return err
+	}
+	if !out.Success {
+		msg := ""
+		if len(out.Errors) > 0 {
+			msg = out.Errors[0].Message
+		}
+		return fmt.Errorf(firstErrorMessage(raw, "rename tunnel failed", msg))
+	}
+	return nil
+}
+
 func (c *Client) PushTunnelIngress(ctx context.Context, accountID string, tunnelID string, rules []IngressRule, publicHost string) error {
 	if accountID == "" || tunnelID == "" {
 		return fmt.Errorf("account ID and tunnel ID are required")
