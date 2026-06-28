@@ -7,6 +7,7 @@
       </div>
       <div class="header-actions">
         <input v-model="searchQuery" type="text" placeholder="Search tunnels..." class="search-input" />
+        <button class="btn-secondary" @click="syncTunnels" :disabled="syncing">{{ syncing ? 'Syncing...' : 'Sync' }}</button>
         <button class="btn-primary" @click="showCreateModal = true">+ New Tunnel</button>
       </div>
     </div>
@@ -105,6 +106,7 @@ export default {
     const currentPage = ref(1)
     const perPage = ref(20)
     const totalTunnels = ref(0)
+    const syncing = ref(false)
     const searchQuery = ref('')
 
     const totalPages = computed(() => Math.ceil(totalTunnels.value / perPage.value))
@@ -142,6 +144,26 @@ export default {
         domains.value = result.domains || []
       } catch (e) {
         console.error('Failed to load domains:', e)
+      }
+    }
+
+    const syncTunnels = async () => {
+      syncing.value = true
+      try {
+        const result = await api.syncTunnels()
+        const parts = []
+        if (result.imported > 0) parts.push(`imported ${result.imported}`)
+        if (result.updated > 0) parts.push(`updated ${result.updated}`)
+        if (parts.length) {
+          alert(`Sync complete: ${parts.join(', ')} tunnel(s)`)
+        } else {
+          alert('All tunnels are up to date')
+        }
+        loadTunnels()
+      } catch (e) {
+        alert('Sync failed: ' + (e.response?.data?.error || e.message))
+      } finally {
+        syncing.value = false
       }
     }
 
@@ -211,7 +233,9 @@ export default {
       totalPages,
       nextPage,
       prevPage,
-      searchQuery
+      searchQuery,
+      syncing,
+      syncTunnels
     }
   }
 }

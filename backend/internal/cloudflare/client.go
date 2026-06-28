@@ -62,6 +62,15 @@ type CreateTunnelResult struct {
 	Token string
 }
 
+type TunnelItem struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Status    string    `json:"status"`
+	AccountID string    `json:"account_id"`
+	CreatedAt time.Time `json:"created_at"`
+	DeletedAt *time.Time `json:"deleted_at"`
+}
+
 // Client is the first Cloudflare service seam for CF Tunnels.
 // Later this layer can enforce app-owned resources, broker central API calls
 // from other self-hosted apps, and support dynamic DNS/tunnel provisioning.
@@ -233,6 +242,55 @@ func (c *Client) CreateTunnel(ctx context.Context, accountID string, tunnelName 
 	return CreateTunnelResult{}, fmt.Errorf("could not register tunnel after retries: Cloudflare keeps returning 409 (name conflict). Delete the old tunnel in Zero Trust -> Networks -> Tunnels, or pick another tunnel name in this app")
 }
 
+func (c *Client) ListTunnels(ctx context.Context, accountID string) ([]TunnelItem, error) {
+	if accountID == "" {
+		return nil, fmt.Errorf("account ID is empty")
+	}
+	if c.APIToken == "" {
+		return nil, fmt.Errorf("API token is empty")
+	}
+
+	var all []TunnelItem
+	page := 1
+	for {
+		var out struct {
+			Success bool          `json:"success"`
+			Result  []TunnelItem  `json:"result"`
+			Errors  []struct {
+				Message string `json:"message"`
+			} `json:"errors"`
+			ResultInfo struct {
+				TotalCount int `json:"total_count"`
+			} `json:"result_info"`
+		}
+
+		url := fmt.Sprintf("%s/accounts/%s/cfd_tunnel?page=%d&per_page=100", baseURL, accountID, page)
+		_, raw, err := c.doJSON(ctx, http.MethodGet, url, nil, &out)
+		if err != nil {
+			return nil, err
+		}
+		if !out.Success {
+			msg := ""
+			if len(out.Errors) > 0 {
+				msg = out.Errors[0].Message
+			}
+			return nil, fmt.Errorf(firstErrorMessage(raw, "Cloudflare tunnel list failed", msg))
+		}
+
+		for _, t := range out.Result {
+			if t.DeletedAt == nil {
+				all = append(all, t)
+			}
+		}
+
+		if len(out.Result) < 100 {
+			break
+		}
+		page++
+	}
+	return all, nil
+}
+
 func (c *Client) DeleteTunnel(ctx context.Context, accountID string, tunnelID string) error {
 	var lastErr error
 	for attempt := 1; attempt <= 5; attempt++ {
@@ -346,6 +404,43 @@ func (c *Client) PushTunnelIngress(ctx context.Context, accountID string, tunnel
 		return fmt.Errorf(strings.Join(parts, " | "))
 	}
 	return nil
+}
+
+type TunnelConfigIngress struct {
+	Hostname string `json:"hostname,omitempty"`
+	Path     string `json:"path,omitempty"`
+	Service  string `json:"service"`
+}
+
+type TunnelConfigResult struct {
+	Ingress []TunnelConfigIngress `json:"ingress"`
+}
+
+func (c *Client) GetTunnelConfig(ctx context.Context, accountID string, tunnelID string) (*TunnelConfigResult, error) {
+	if accountID == "" || tunnelID == "" {
+		return nil, fmt.Errorf("account ID and tunnel ID are required")
+	}
+	var out struct {
+		Success bool `json:"success"`
+		Result  struct {
+			Config TunnelConfigResult `json:"config"`
+		} `json:"result"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	_, raw, err := c.doJSON(ctx, http.MethodGet, fmt.Sprintf("%s/accounts/%s/cfd_tunnel/%s/configurations", baseURL, accountID, tunnelID), nil, &out)
+	if err != nil {
+		return nil, err
+	}
+	if !out.Success {
+		msg := ""
+		if len(out.Errors) > 0 {
+			msg = out.Errors[0].Message
+		}
+		return nil, fmt.Errorf(firstErrorMessage(raw, "failed to get tunnel config", msg))
+	}
+	return &out.Result.Config, nil
 }
 
 func (c *Client) ListZones(ctx context.Context, page string, perPage string) (ListZonesResult, error) {

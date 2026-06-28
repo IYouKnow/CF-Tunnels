@@ -420,6 +420,7 @@ func main() {
 	r.POST("/api/tunnels", createTunnel)
 	r.GET("/api/tunnels/:id", getTunnel)
 	r.DELETE("/api/tunnels/:id", deleteTunnel)
+	r.POST("/api/tunnels/sync", syncTunnels)
 	r.POST("/api/tunnels/:id/start", startTunnel)
 	r.POST("/api/tunnels/:id/stop", stopTunnel)
 	r.GET("/api/tunnels/:id/logs", getTunnelLogs)
@@ -661,6 +662,19 @@ func createTunnel(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, gin.H{"id": result.ID, "name": result.Name})
+}
+
+func syncTunnels(c *gin.Context) {
+	if cfg.APIToken == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Cloudflare API token not configured"})
+		return
+	}
+	imported, updated, err := tunnelSvc.SyncTunnels(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"imported": imported, "updated": updated})
 }
 
 func getTunnel(c *gin.Context) {

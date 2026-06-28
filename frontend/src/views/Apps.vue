@@ -112,32 +112,49 @@
     </div>
 
     <div v-if="showCreateToken && selectedApp" class="modal-overlay" @click.self="showCreateToken = false">
-      <div class="modal">
-        <h2>Create Token</h2>
+      <div class="modal token-modal">
+        <div class="token-modal-header">
+          <div>
+            <p class="eyebrow">Scoped access</p>
+            <h2>Create Token</h2>
+            <p class="token-modal-subtitle">Choose the exact permissions this token should carry. Only supported app scopes can be selected.</p>
+          </div>
+          <div class="token-scope-count">{{ newToken.scopes.length }} selected</div>
+        </div>
         <form @submit.prevent="submitCreateToken">
           <div class="form-group">
             <label>Token Name</label>
-            <input v-model="newToken.name" type="text" required />
+            <input v-model="newToken.name" type="text" placeholder="Default token" required />
           </div>
-          <div class="form-group">
-            <label>Scopes</label>
-            <div class="scope-presets">
-              <button type="button" class="btn-secondary btn-preset" @click="applyScopePreset(['resources:read', 'dns:read'])">Read only</button>
-              <button type="button" class="btn-secondary btn-preset" @click="applyScopePreset(['resources:read', 'dns:read', 'dns:create', 'dns:update'])">DNS manager</button>
-              <button type="button" class="btn-secondary btn-preset" @click="applyScopePreset([])">Clear</button>
+          <div class="form-group token-scope-panel">
+            <div class="scope-panel-header">
+              <label>Permissions</label>
+              <div class="scope-presets">
+                <button type="button" class="preset-pill" @click="applyScopePreset(['resources:read', 'dns:read'])">Read only</button>
+                <button type="button" class="preset-pill" @click="applyScopePreset(['resources:read', 'dns:read', 'dns:create', 'dns:update'])">DNS manager</button>
+                <button type="button" class="preset-pill preset-clear" @click="applyScopePreset([])">Clear</button>
+              </div>
+            </div>
+            <div class="selected-scope-strip">
+              <div class="selected-scope-title">Selected scopes</div>
+              <div v-if="newToken.scopes.length" class="token-scopes">
+                <span v-for="scope in newToken.scopes" :key="scope" class="scope-chip">{{ scope }}</span>
+              </div>
+              <p v-else class="selected-scope-empty">No permissions selected yet.</p>
             </div>
             <div class="scope-selector">
-              <label v-for="scope in scopeOptions" :key="scope.value" class="scope-option">
+              <label v-for="scope in scopeOptions" :key="scope.value" :class="['scope-option', { selected: newToken.scopes.includes(scope.value) }]">
                 <input v-model="newToken.scopes" type="checkbox" :value="scope.value" />
-                <div class="scope-copy">
-                  <div class="scope-heading">
-                    <strong>{{ scope.value }}</strong>
-                    <span>{{ scope.label }}</span>
+                <div class="scope-option-main">
+                  <div class="scope-option-copy">
+                    <strong>{{ scope.label }}</strong>
+                    <small>{{ scope.description }}</small>
                   </div>
-                  <small>{{ scope.description }}</small>
+                  <span class="scope-code">{{ scope.value }}</span>
                 </div>
               </label>
             </div>
+            <p class="scope-footnote">Only supported app permissions can be used here. Tunnel scopes are intentionally excluded for now.</p>
           </div>
           <div class="form-group">
             <label>Expires At</label>
@@ -433,9 +450,9 @@ export default {
   align-items: center;
   padding: 0.28rem 0.65rem;
   border-radius: 999px;
-  background: rgba(59, 130, 246, 0.12);
-  border: 1px solid rgba(59, 130, 246, 0.24);
-  color: var(--text-primary);
+  background: rgba(59, 130, 246, 0.16);
+  border: 1px solid rgba(59, 130, 246, 0.28);
+  color: #dbeafe;
   font-size: 0.82rem;
 }
 
@@ -449,11 +466,25 @@ export default {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
-  margin-bottom: 0.9rem;
 }
 
-.btn-preset {
+.preset-pill {
   padding: 0.45rem 0.8rem;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.preset-pill:hover {
+  border-color: rgba(45, 212, 191, 0.4);
+  background: rgba(45, 212, 191, 0.08);
+}
+
+.preset-clear {
+  color: var(--text-secondary);
 }
 
 .scope-selector {
@@ -463,33 +494,61 @@ export default {
 
 .scope-option {
   display: flex;
-  gap: 0.75rem;
-  align-items: flex-start;
-  padding: 0.85rem 1rem;
+  gap: 0.85rem;
+  align-items: center;
+  padding: 1rem;
   border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--bg-tertiary);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
   cursor: pointer;
+  transition: border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
+}
+
+.scope-option:hover {
+  border-color: rgba(59, 130, 246, 0.32);
+  background: rgba(59, 130, 246, 0.05);
+}
+
+.scope-option.selected {
+  border-color: rgba(45, 212, 191, 0.45);
+  background: rgba(45, 212, 191, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(45, 212, 191, 0.12);
 }
 
 .scope-option input {
-  margin-top: 0.15rem;
+  width: 16px;
+  height: 16px;
+  accent-color: #14b8a6;
+  flex: 0 0 auto;
 }
 
-.scope-copy {
+.scope-option-main {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  min-width: 0;
+  width: 100%;
+}
+
+.scope-option-copy {
   display: grid;
   gap: 0.3rem;
+  min-width: 0;
 }
 
-.scope-heading {
-  display: flex;
-  flex-direction: column;
-  gap: 0.12rem;
-}
-
-.scope-heading span,
-.scope-copy small {
+.scope-code,
+.scope-option-copy small {
   color: var(--text-secondary);
+}
+
+.scope-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  padding: 0.22rem 0.45rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  flex: 0 0 auto;
 }
 
 .token-meta,
@@ -518,6 +577,108 @@ export default {
   overflow-wrap: anywhere;
 }
 
+.token-modal {
+  width: min(900px, 96vw);
+  max-width: min(900px, 96vw);
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(243, 128, 32, 0.7) rgba(255, 255, 255, 0.05);
+}
+
+.token-modal::-webkit-scrollbar {
+  width: 12px;
+}
+
+.token-modal::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 999px;
+}
+
+.token-modal::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, rgba(243, 128, 32, 0.9), rgba(255, 157, 77, 0.85));
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.token-modal::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, rgba(255, 157, 77, 0.95), rgba(243, 128, 32, 0.95));
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.token-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  margin-bottom: 1.2rem;
+}
+
+.eyebrow {
+  margin: 0 0 0.35rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #0f766e;
+}
+
+.token-modal-subtitle {
+  margin: 0.35rem 0 0;
+  color: var(--text-secondary);
+  max-width: 52ch;
+}
+
+.token-scope-count {
+  padding: 0.5rem 0.85rem;
+  border-radius: 999px;
+  background: rgba(45, 212, 191, 0.08);
+  border: 1px solid rgba(45, 212, 191, 0.18);
+  color: #99f6e4;
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.token-scope-panel {
+  margin-bottom: 0;
+}
+
+.scope-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 0.85rem;
+}
+
+.selected-scope-strip {
+  margin-bottom: 0.9rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.selected-scope-title {
+  margin-bottom: 0.55rem;
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.selected-scope-empty {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
+.scope-footnote {
+  margin: 0.85rem 0 0;
+  color: var(--text-secondary);
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
 .error-msg {
   color: var(--error);
   margin-top: 0.25rem;
@@ -533,6 +694,13 @@ export default {
   .token-actions,
   .detail-header,
   .token-toolbar {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .token-modal-header,
+  .scope-panel-header,
+  .scope-option-main {
     flex-direction: column;
     align-items: flex-start;
   }

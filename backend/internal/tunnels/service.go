@@ -153,6 +153,112 @@ func (s *Service) CreateTunnel(ctx context.Context, input CreateTunnelInput) (Cr
 	return CreateTunnelResult{ID: id, Name: input.Name}, nil
 }
 
+func (s *Service) SyncTunnels(ctx context.Context) (imported int, updated int, err error) {
+	if !s.HasAPIToken {
+		return 0, 0, fmt.Errorf("Cloudflare API token not configured")
+	}
+	cfTunnels, err := s.CF.ListTunnels(ctx, s.DefaultAccountID)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	zones, _ := s.CF.ListZones(ctx, "1", "100")
+	zoneMap := make([]cloudflare.Zone, 0)
+	if zones.Total > 0 {
+		zoneMap = zones.Domains
+		if zones.Total > len(zones.Domains) {
+			more, _ := s.CF.ListZones(ctx, "2", "100")
+			zoneMap = append(zoneMap, more.Domains...)
+		}
+	}
+
+	imported = 0
+	updated = 0
+	for _, t := range cfTunnels {
+		cfStatus := "stopped"
+		if t.Status == "healthy" || t.Status == "degraded" {
+			cfStatus = "running"
+		}
+
+		var existingID int
+		err := s.DB.QueryRow("SELECT id FROM tunnels WHERE uuid = ?", t.ID).Scan(&existingID)
+		if err == sql.ErrNoRows {
+			var zoneID, subdomain, domain, address string
+			cfg, cfgErr := s.CF.GetTunnelConfig(ctx, s.DefaultAccountID, t.ID)
+			if cfgErr == nil && cfg != nil {
+				for _, rule := range cfg.Ingress {
+					if rule.Hostname != "" && rule.Service != "" && !strings.HasPrefix(rule.Service, "http_status:") {
+						hostname := rule.Hostname
+						address = rule.Service
+						if zid, dm, sub := matchZoneForHostname(hostname, zoneMap); zid != "" {
+							zoneID = zid
+							domain = dm
+							subdomain = sub
+						} else {
+							domain = hostname
+						}
+						break
+					}
+				}
+			}
+
+			_, insertErr := s.DB.Exec(
+				"INSERT INTO tunnels (name, uuid, account_id, zone_id, subdomain, domain, address, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+				t.Name, t.ID, t.AccountID, zoneID, subdomain, domain, address, cfStatus, t.CreatedAt,
+			)
+			if insertErr != nil {
+				log.Printf("[sync] Failed to import tunnel %q: %v", t.Name, insertErr)
+				continue
+			}
+			imported++
+			s.logTunnel(t.Name, "info", "Imported from Cloudflare")
+		} else {
+			// Update status for existing tunnels
+			s.DB.Exec("UPDATE tunnels SET status = ? WHERE id = ?", cfStatus, existingID)
+
+			// Fill in missing domain/address from ingress config
+			var currentAddress, currentDomain string
+			s.DB.QueryRow("SELECT COALESCE(address,''), COALESCE(domain,'') FROM tunnels WHERE id = ?", existingID).Scan(&currentAddress, &currentDomain)
+			if currentAddress == "" || currentDomain == "" {
+				cfg, cfgErr := s.CF.GetTunnelConfig(ctx, s.DefaultAccountID, t.ID)
+				if cfgErr == nil && cfg != nil {
+					for _, rule := range cfg.Ingress {
+						if rule.Hostname != "" && rule.Service != "" && !strings.HasPrefix(rule.Service, "http_status:") {
+							if currentAddress == "" {
+								currentAddress = rule.Service
+							}
+							if currentDomain == "" {
+								if zid, dm, sub := matchZoneForHostname(rule.Hostname, zoneMap); zid != "" {
+									s.DB.Exec("UPDATE tunnels SET zone_id = ?, subdomain = ?, domain = ?, address = ? WHERE id = ?", zid, sub, dm, currentAddress, existingID)
+								} else {
+									s.DB.Exec("UPDATE tunnels SET domain = ?, address = ? WHERE id = ?", rule.Hostname, currentAddress, existingID)
+								}
+							}
+							break
+						}
+					}
+				}
+			}
+			updated++
+		}
+	}
+	return imported, updated, nil
+}
+
+func matchZoneForHostname(hostname string, zones []cloudflare.Zone) (zoneID, domain, subdomain string) {
+	hostname = strings.TrimSuffix(hostname, ".")
+	parts := strings.Split(hostname, ".")
+	for i := 1; i < len(parts)-1; i++ {
+		candidate := strings.Join(parts[i:], ".")
+		for _, z := range zones {
+			if strings.EqualFold(z.Name, candidate) {
+				return z.ID, z.Name, strings.Join(parts[:i], ".")
+			}
+		}
+	}
+	return "", "", ""
+}
+
 // StartTunnel will later be reused by dashboard routes, the internal API,
 // and app-owned provisioning so tunnel bootstrapping stays in one place.
 func (s *Service) StartTunnel(ctx context.Context, id int) (StartTunnelResult, error) {
