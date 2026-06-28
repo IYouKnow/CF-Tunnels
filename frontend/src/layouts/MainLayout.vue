@@ -95,6 +95,11 @@
       </div>
     </main>
   </div>
+  <div class="toast-container">
+    <div v-for="t in toasts" :key="t.id" :class="['toast', 'toast-' + t.type]">
+      {{ t.message }}
+    </div>
+  </div>
 </template>
 
 <script>
@@ -102,6 +107,7 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api from '../api'
 import { currentUser } from '../auth'
+import { useToast } from '../toast'
 
 const routeTitles = {
   '/': 'Dashboard',
@@ -148,7 +154,9 @@ export default {
       document.documentElement.setAttribute('data-theme', newTheme)
     })
 
-    return { theme, pageTitle, toggleTheme, displayName, userInitial, logout }
+    const { toasts } = useToast()
+
+    return { theme, pageTitle, toggleTheme, displayName, userInitial, logout, toasts }
   }
 }
 </script>
@@ -157,5 +165,53 @@ export default {
 .logout-btn {
   width: 100%;
   font-size: 0.85rem;
+}
+
+.toast-container {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  pointer-events: none;
+}
+
+.toast {
+  padding: 0.625rem 1rem;
+  border-radius: 10px;
+  font-size: 0.8125rem;
+  font-weight: 450;
+  line-height: 1.4;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08), 0 0 0 1px inset;
+  animation: toast-in 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  pointer-events: auto;
+  max-width: 360px;
+}
+
+.toast-success {
+  color: var(--success);
+  background: rgba(34, 197, 94, 0.08);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08), inset 0 0 0 1px rgba(34, 197, 94, 0.2);
+}
+
+.toast-error {
+  color: var(--error);
+  background: rgba(239, 68, 68, 0.08);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08), inset 0 0 0 1px rgba(239, 68, 68, 0.2);
+}
+
+.toast-info {
+  color: var(--text-secondary);
+  background: rgba(160, 160, 160, 0.06);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08), inset 0 0 0 1px var(--border);
+}
+
+@keyframes toast-in {
+  from { transform: translateY(-8px) scale(0.97); opacity: 0; }
+  to { transform: translateY(0) scale(1); opacity: 1; }
 }
 </style>

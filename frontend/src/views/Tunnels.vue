@@ -95,6 +95,7 @@
 <script>
 import { ref, onMounted, computed } from 'vue'
 import api from '../api'
+import { showToast } from '../toast'
 
 export default {
   name: 'Tunnels',
@@ -155,13 +156,13 @@ export default {
         if (result.imported > 0) parts.push(`imported ${result.imported}`)
         if (result.updated > 0) parts.push(`updated ${result.updated}`)
         if (parts.length) {
-          alert(`Sync complete: ${parts.join(', ')} tunnel(s)`)
+          showToast(`Sync complete: ${parts.join(', ')} tunnel(s)`)
         } else {
-          alert('All tunnels are up to date')
+          showToast('All tunnels are up to date', 'info')
         }
         loadTunnels()
       } catch (e) {
-        alert('Sync failed: ' + (e.response?.data?.error || e.message))
+        showToast('Sync failed: ' + (e.response?.data?.error || e.message), 'error')
       } finally {
         syncing.value = false
       }

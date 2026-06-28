@@ -63,11 +63,11 @@ type CreateTunnelResult struct {
 }
 
 type TunnelItem struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Status    string    `json:"status"`
-	AccountID string    `json:"account_id"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        string     `json:"id"`
+	Name      string     `json:"name"`
+	Status    string     `json:"status"`
+	AccountID string     `json:"account_tag"`
+	CreatedAt time.Time  `json:"created_at"`
 	DeletedAt *time.Time `json:"deleted_at"`
 }
 

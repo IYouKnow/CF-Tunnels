@@ -162,14 +162,18 @@ func (s *Service) SyncTunnels(ctx context.Context) (imported int, updated int, e
 		return 0, 0, err
 	}
 
-	zones, _ := s.CF.ListZones(ctx, "1", "100")
 	zoneMap := make([]cloudflare.Zone, 0)
-	if zones.Total > 0 {
-		zoneMap = zones.Domains
-		if zones.Total > len(zones.Domains) {
-			more, _ := s.CF.ListZones(ctx, "2", "100")
+	if zr, zErr := s.CF.ListZones(ctx, "1", "100"); zErr == nil {
+		zoneMap = zr.Domains
+		for pg := 2; len(zoneMap) < zr.Total; pg++ {
+			more, mErr := s.CF.ListZones(ctx, fmt.Sprintf("%d", pg), "100")
+			if mErr != nil {
+				break
+			}
 			zoneMap = append(zoneMap, more.Domains...)
 		}
+	} else {
+		log.Printf("[sync] ListZones failed (zones needed for hostname resolution): %v", zErr)
 	}
 
 	imported = 0
@@ -185,6 +189,9 @@ func (s *Service) SyncTunnels(ctx context.Context) (imported int, updated int, e
 		if err == sql.ErrNoRows {
 			var zoneID, subdomain, domain, address string
 			cfg, cfgErr := s.CF.GetTunnelConfig(ctx, s.DefaultAccountID, t.ID)
+			if cfgErr != nil {
+				log.Printf("[sync] GetTunnelConfig failed for %s (%s): %v", t.Name, t.ID, cfgErr)
+			}
 			if cfgErr == nil && cfg != nil {
 				for _, rule := range cfg.Ingress {
 					if rule.Hostname != "" && rule.Service != "" && !strings.HasPrefix(rule.Service, "http_status:") {
@@ -221,6 +228,9 @@ func (s *Service) SyncTunnels(ctx context.Context) (imported int, updated int, e
 			s.DB.QueryRow("SELECT COALESCE(address,''), COALESCE(domain,'') FROM tunnels WHERE id = ?", existingID).Scan(&currentAddress, &currentDomain)
 			if currentAddress == "" || currentDomain == "" {
 				cfg, cfgErr := s.CF.GetTunnelConfig(ctx, s.DefaultAccountID, t.ID)
+				if cfgErr != nil {
+					log.Printf("[sync] GetTunnelConfig for existing tunnel %s (%s): %v", t.Name, t.ID, cfgErr)
+				}
 				if cfgErr == nil && cfg != nil {
 					for _, rule := range cfg.Ingress {
 						if rule.Hostname != "" && rule.Service != "" && !strings.HasPrefix(rule.Service, "http_status:") {
