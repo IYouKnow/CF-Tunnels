@@ -57,6 +57,7 @@ export default {
   updateIngressRule: (id, data) => client.put(`/api/ingress/${id}`, data).then(r => r.data),
   deleteIngressRule: (id) => client.delete(`/api/ingress/${id}`).then(r => r.data),
   getDomains: (page = 1, perPage = 50) => client.get(`/api/domains?page=${page}&per_page=${perPage}`).then(r => r.data),
+  getDNSRecords: (zoneId, page = 1, perPage = 100) => client.get(`/api/dns/records?zone_id=${zoneId}&page=${page}&per_page=${perPage}`).then(r => r.data),
   createDNSRecord: (data) => client.post('/api/dns', data).then(r => r.data),
   deleteDNSRecord: (zoneId, recordId) => client.delete(`/api/dns/${zoneId}/${recordId}`).then(r => r.data),
   getApps: () => client.get('/api/apps').then(r => r.data),

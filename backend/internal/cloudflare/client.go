@@ -596,6 +596,35 @@ func (c *Client) FindCNAMERecordID(ctx context.Context, zoneID string, fqdn stri
 	return out.Result[0].ID, nil
 }
 
+func (c *Client) ListDNSRecordsByZone(ctx context.Context, zoneID string, page, perPage int) ([]DNSRecord, int, error) {
+	if zoneID == "" || c.APIToken == "" {
+		return nil, 0, fmt.Errorf("zone ID and API token are required")
+	}
+	var out struct {
+		Success bool        `json:"success"`
+		Result  []DNSRecord `json:"result"`
+		Errors  []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+		ResultInfo struct {
+			TotalCount int `json:"total_count"`
+		} `json:"result_info"`
+	}
+	url := fmt.Sprintf("%s/zones/%s/dns_records?page=%d&per_page=%d", baseURL, zoneID, page, perPage)
+	_, raw, err := c.doJSON(ctx, http.MethodGet, url, nil, &out)
+	if err != nil {
+		return nil, 0, err
+	}
+	if !out.Success {
+		msg := ""
+		if len(out.Errors) > 0 {
+			msg = out.Errors[0].Message
+		}
+		return nil, 0, fmt.Errorf(firstErrorMessage(raw, "list DNS records failed", msg))
+	}
+	return out.Result, out.ResultInfo.TotalCount, nil
+}
+
 func (c *Client) FindDNSRecords(ctx context.Context, zoneID string, fqdn string, recordType string) ([]DNSRecord, error) {
 	if zoneID == "" || fqdn == "" || c.APIToken == "" {
 		return []DNSRecord{}, nil

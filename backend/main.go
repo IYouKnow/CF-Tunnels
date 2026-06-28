@@ -434,6 +434,7 @@ func main() {
 
 	r.GET("/api/status", getStatus)
 	r.GET("/api/domains", listDomains)
+	r.GET("/api/dns/records", listDNSRecords)
 	r.POST("/api/dns", createDNSRecord)
 	r.DELETE("/api/dns/:zoneId/:recordId", deleteDNSRecord)
 	r.GET("/api/apps", listApps)
@@ -1208,6 +1209,79 @@ func patchAppDNSRecord(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, record)
+}
+
+func listDNSRecords(c *gin.Context) {
+	if cfg.APIToken == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Cloudflare API token not configured"})
+		return
+	}
+	zoneID := strings.TrimSpace(c.Query("zone_id"))
+	if zoneID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "zone_id is required"})
+		return
+	}
+	page := 1
+	perPage := 100
+	if p := c.Query("page"); p != "" {
+		page, _ = strconv.Atoi(p)
+	}
+	if pp := c.Query("per_page"); pp != "" {
+		perPage, _ = strconv.Atoi(pp)
+	}
+
+	records, total, err := cfClient.ListDNSRecordsByZone(c.Request.Context(), zoneID, page, perPage)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Annotate records with matching tunnel names
+	tunnelFQDN := make(map[string]string)
+	rows, qErr := db.Query("SELECT subdomain, domain, name FROM tunnels WHERE zone_id = ? AND COALESCE(subdomain,'') != '' AND COALESCE(domain,'') != ''", zoneID)
+	if qErr == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var sub, dom, tname string
+			rows.Scan(&sub, &dom, &tname)
+			if sub != "" && dom != "" {
+				tunnelFQDN[sub+"."+dom] = tname
+			}
+		}
+	}
+
+	type recordWithTunnel struct {
+		ID         string `json:"id"`
+		Type       string `json:"type"`
+		Name       string `json:"name"`
+		Content    string `json:"content"`
+		Proxied    *bool  `json:"proxied,omitempty"`
+		TTL        int    `json:"ttl,omitempty"`
+		ZoneID     string `json:"zone_id,omitempty"`
+		TunnelName string `json:"tunnel_name,omitempty"`
+	}
+
+	annotated := make([]recordWithTunnel, 0, len(records))
+	for _, r := range records {
+		tn := recordWithTunnel{
+			ID:      r.ID,
+			Type:    r.Type,
+			Name:    r.Name,
+			Content: r.Content,
+			Proxied: r.Proxied,
+			TTL:     r.TTL,
+			ZoneID:  r.ZoneID,
+		}
+		// Match by FQDN (Cloudflare returns name with trailing dot stripped at rest)
+		if name := strings.TrimSuffix(r.Name, "."); name != "" {
+			if t, ok := tunnelFQDN[name]; ok {
+				tn.TunnelName = t
+			}
+		}
+		annotated = append(annotated, tn)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"records": annotated, "total": total})
 }
 
 func listDomains(c *gin.Context) {
