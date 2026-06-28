@@ -101,6 +101,10 @@ export default {
       try {
         const result = await api.getDomains(1, 100)
         domains.value = result.domains || []
+        if (domains.value.length > 0 && !selectedZone.value) {
+          selectedZone.value = domains.value[0].id
+          loadRecords()
+        }
       } catch (e) {
         showToast('Failed to load domains: ' + (e.response?.data?.error || e.message), 'error')
       }

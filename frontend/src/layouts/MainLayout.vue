@@ -55,31 +55,42 @@
       </nav>
 
       <div class="sidebar-footer">
-        <button class="theme-toggle" @click="toggleTheme">
-          <svg v-if="theme === 'dark'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="5"/>
-            <line x1="12" y1="1" x2="12" y2="3"/>
-            <line x1="12" y1="21" x2="12" y2="23"/>
-            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
-            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
-            <line x1="1" y1="12" x2="3" y2="12"/>
-            <line x1="21" y1="12" x2="23" y2="12"/>
-            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
-            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
-          </svg>
-          <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
-          </svg>
-          <span>{{ theme === 'dark' ? 'Light Mode' : 'Dark Mode' }}</span>
-        </button>
-
-        <div class="user-info">
-          <div class="user-avatar">{{ userInitial }}</div>
-          <span class="user-name">{{ displayName }}</span>
+        <div class="account-card">
+          <div class="account-header" @click="accountOpen = !accountOpen">
+            <div class="account-avatar">{{ userInitial }}</div>
+            <div class="account-info">
+              <div class="account-name">{{ displayName }}</div>
+              <div class="account-role">Admin</div>
+            </div>
+            <svg :class="['chevron', { open: accountOpen }]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+              <polyline points="6 9 12 15 18 9"/>
+            </svg>
+          </div>
+          <div v-if="accountOpen" class="account-dropdown">
+            <button class="account-item" @click="toggleTheme">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                <circle cx="12" cy="12" r="5"/>
+                <line x1="12" y1="1" x2="12" y2="3"/>
+                <line x1="12" y1="21" x2="12" y2="23"/>
+                <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
+                <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+                <line x1="1" y1="12" x2="3" y2="12"/>
+                <line x1="21" y1="12" x2="23" y2="12"/>
+                <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
+                <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+              </svg>
+              <span>{{ theme === 'dark' ? 'Light mode' : 'Dark mode' }}</span>
+            </button>
+            <button class="account-item logout" @click="logout">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+                <polyline points="16 17 21 12 16 7"/>
+                <line x1="21" y1="12" x2="9" y2="12"/>
+              </svg>
+              <span>Sign out</span>
+            </button>
+          </div>
         </div>
-        <button type="button" class="btn-secondary logout-btn" @click="logout">
-          Sign out
-        </button>
       </div>
     </aside>
 
@@ -154,17 +165,114 @@ export default {
       document.documentElement.setAttribute('data-theme', newTheme)
     })
 
+    const accountOpen = ref(false)
     const { toasts } = useToast()
 
-    return { theme, pageTitle, toggleTheme, displayName, userInitial, logout, toasts }
+    return { theme, pageTitle, toggleTheme, displayName, userInitial, logout, toasts, accountOpen }
   }
 }
 </script>
 
 <style scoped>
-.logout-btn {
+.sidebar-footer {
+  padding: 0.5rem;
+}
+
+.account-card {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.account-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.625rem;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s;
+}
+
+.account-header:hover {
+  background: var(--bg-elevated);
+}
+
+.account-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: white;
+  font-size: 0.75rem;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.account-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.account-name {
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--text-primary);
+  line-height: 1.3;
+}
+
+.account-role {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  line-height: 1.2;
+}
+
+.chevron {
+  color: var(--text-muted);
+  transition: transform 0.2s;
+  flex-shrink: 0;
+}
+
+.chevron.open {
+  transform: rotate(180deg);
+}
+
+.account-dropdown {
+  border-top: 1px solid var(--border);
+  padding: 0.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.account-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.375rem 0.5rem;
+  border: none;
+  background: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  cursor: pointer;
+  transition: all 0.12s;
   width: 100%;
-  font-size: 0.85rem;
+  text-align: left;
+}
+
+.account-item:hover {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+
+.account-item.logout:hover {
+  color: var(--error);
+  background: var(--error-subtle);
 }
 
 .toast-container {
