@@ -275,7 +275,7 @@ export default {
     }
 
     const goToTunnel = (tunnelName) => {
-      router.push('/tunnels')
+      router.push({ path: '/tunnels', query: { highlight: tunnelName } })
     }
 
     onMounted(loadDomains)

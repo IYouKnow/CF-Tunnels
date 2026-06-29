@@ -21,7 +21,7 @@
         <div class="col-status">Status</div>
         <div class="col-actions">Actions</div>
       </div>
-      <div v-for="tunnel in filteredTunnels" :key="tunnel.id" class="table-row">
+      <div v-for="tunnel in filteredTunnels" :key="tunnel.id" :id="'tunnel-' + tunnel.name" :class="['table-row', { highlighted: highlightedTunnel === tunnel.name }]">
         <div class="col-name">
           <div class="tunnel-name">{{ tunnel.name }}</div>
         </div>
@@ -125,10 +125,13 @@
 </template>
 
 <script>
-import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
+import { useRoute } from 'vue-router'
 import api from '../api'
 import { showToast } from '../toast'
 import ConfirmModal from '../components/ConfirmModal.vue'
+
+let syncedOnce = false
 
 export default {
   name: 'Tunnels',
@@ -150,6 +153,8 @@ export default {
     const syncing = ref(false)
     const openDropdown = ref(null)
     const searchQuery = ref('')
+    const highlightedTunnel = ref(null)
+    const route = useRoute()
 
     const totalPages = computed(() => Math.ceil(totalTunnels.value / perPage.value))
 
@@ -250,17 +255,21 @@ export default {
     }
 
     const createTunnel = async () => {
-      await api.createTunnel({
-        name: newTunnel.value.name,
-        account_id: newTunnel.value.account_id,
-        zone_id: newTunnel.value.zone_id,
-        domain: selectedDomainName.value,
-        subdomain: newTunnel.value.subdomain,
-        address: newTunnel.value.address
-      })
-      showCreateModal.value = false
-      newTunnel.value = { name: '', account_id: '', zone_id: '', subdomain: '', address: '' }
-      loadTunnels()
+      try {
+        await api.createTunnel({
+          name: newTunnel.value.name,
+          account_id: newTunnel.value.account_id,
+          zone_id: newTunnel.value.zone_id,
+          domain: selectedDomainName.value,
+          subdomain: newTunnel.value.subdomain,
+          address: newTunnel.value.address
+        })
+        showCreateModal.value = false
+        newTunnel.value = { name: '', account_id: '', zone_id: '', subdomain: '', address: '' }
+        loadTunnels()
+      } catch (e) {
+        showToast(e.response?.data?.error || e.message, 'error')
+      }
     }
 
     const startTunnel = async (id) => {
@@ -304,17 +313,31 @@ export default {
 
     onMounted(async () => {
       loadDomains()
-      await syncTunnels()
+      if (!syncedOnce) {
+        syncedOnce = true
+        await syncTunnels()
+      }
+      await loadTunnels()
       pollTimer = setInterval(loadTunnels, 60000)
+      if (route.query.highlight) {
+        highlightedTunnel.value = route.query.highlight
+        await nextTick()
+        const el = document.getElementById('tunnel-' + highlightedTunnel.value)
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      }
     })
 
     onUnmounted(() => {
       if (pollTimer) clearInterval(pollTimer)
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('click', closeDropdown)
+      }
     })
 
-    // Close dropdown on outside click
+    const closeDropdown = () => { openDropdown.value = null }
+
     if (typeof window !== 'undefined') {
-      window.addEventListener('click', () => { openDropdown.value = null })
+      window.addEventListener('click', closeDropdown)
     }
 
     return { 
@@ -340,6 +363,7 @@ export default {
       nextPage,
       prevPage,
       searchQuery,
+      highlightedTunnel,
       syncing,
       syncTunnels,
       openDropdown,
@@ -424,6 +448,11 @@ export default {
 
 .table-row:hover {
   background: var(--bg-tertiary);
+}
+
+.table-row.highlighted {
+  background: var(--accent-subtle);
+  border-left: 3px solid var(--accent);
 }
 
 .col-name {
