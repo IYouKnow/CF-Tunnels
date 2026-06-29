@@ -31,6 +31,8 @@ import (
 	"github.com/spf13/viper"
 )
 
+var AppVersion = "1.0.4"
+
 type Config struct {
 	APIToken      string `mapstructure:"CF_API_TOKEN" env:"CF_API_TOKEN"`
 	AccountID     string `mapstructure:"CF_ACCOUNT_ID" env:"CF_ACCOUNT_ID"`
@@ -436,7 +438,15 @@ func main() {
 	r.GET("/api/domains", listDomains)
 	r.GET("/api/dns/records", listDNSRecords)
 	r.POST("/api/dns", createDNSRecord)
+	r.PUT("/api/dns/:zoneId/:recordId", updateDNSRecord)
 	r.DELETE("/api/dns/:zoneId/:recordId", deleteDNSRecord)
+	r.GET("/api/cloudflared/version", getCloudflaredVersion)
+	r.GET("/api/cloudflared/check-update", getCloudflaredUpdate)
+	r.POST("/api/cloudflared/update", updateCloudflared)
+
+	r.GET("/api/app/version", getAppVersion)
+	r.GET("/api/app/check-update", getAppUpdate)
+
 	r.GET("/api/apps", listApps)
 	r.POST("/api/apps", createApp)
 	r.GET("/api/apps/:id", getApp)
@@ -1072,6 +1082,65 @@ func deleteAppToken(c *gin.Context) {
 	}
 }
 
+func getCloudflaredVersion(c *gin.Context) {
+	info, err := tunnelSvc.GetCloudflaredVersion(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, info)
+}
+
+func getCloudflaredUpdate(c *gin.Context) {
+	info, err := tunnelSvc.CheckCloudflaredUpdate(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, info)
+}
+
+func updateCloudflared(c *gin.Context) {
+	msg, err := tunnelSvc.UpdateCloudflared(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": msg, "detail": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": msg})
+}
+
+func getAppVersion(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"version": AppVersion})
+}
+
+func getAppUpdate(c *gin.Context) {
+	req, _ := http.NewRequestWithContext(c.Request.Context(), "GET", "https://api.github.com/repos/IYouKnow/CF-Tunnels/releases/latest", nil)
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+	var release struct {
+		TagName string `json:"tag_name"`
+		HTMLURL string `json:"html_url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	latest := strings.TrimPrefix(release.TagName, "v")
+	hasUpdate := latest != AppVersion
+	c.JSON(http.StatusOK, gin.H{
+		"currentVersion": AppVersion,
+		"latestVersion":  latest,
+		"hasUpdate":      hasUpdate,
+		"releaseUrl":     release.HTMLURL,
+	})
+}
+
 func getAppMe(c *gin.Context) {
 	rawApp, _ := c.Get("app")
 	rawScopes, _ := c.Get("app_scopes")
@@ -1341,6 +1410,7 @@ func createDNSRecord(c *gin.Context) {
 		Name    string `json:"name" binding:"required"`
 		Content string `json:"content" binding:"required"`
 		Type    string `json:"type"`
+		Proxied *bool  `json:"proxied"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -1355,6 +1425,7 @@ func createDNSRecord(c *gin.Context) {
 		Type:    req.Type,
 		Name:    req.Name,
 		Content: req.Content,
+		Proxied: req.Proxied,
 	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -1362,6 +1433,45 @@ func createDNSRecord(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, record)
+}
+
+func updateDNSRecord(c *gin.Context) {
+	zoneID := c.Param("zoneId")
+	recordID := c.Param("recordId")
+
+	if cfg.APIToken == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Cloudflare API token not configured"})
+		return
+	}
+
+	var req struct {
+		Type    string `json:"type"`
+		Name    string `json:"name"`
+		Content string `json:"content"`
+		Proxied *bool  `json:"proxied"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if req.Type == "" || req.Name == "" || req.Content == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "type, name, and content are required"})
+		return
+	}
+
+	record, err := cfClient.UpdateDNSRecord(c.Request.Context(), zoneID, recordID, cloudflare.DNSRecordInput{
+		Type:    req.Type,
+		Name:    req.Name,
+		Content: req.Content,
+		Proxied: req.Proxied,
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, record)
 }
 
 func deleteDNSRecord(c *gin.Context) {

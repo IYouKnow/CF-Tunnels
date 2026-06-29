@@ -5,10 +5,12 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -17,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cf-tunnel-manager/backend/internal/cloudflare"
 )
@@ -699,4 +702,87 @@ func originServiceURLForIngress(service string) string {
 	default:
 		return orig
 	}
+}
+
+func resolveCloudflaredPath() string {
+	exeDir, _ := filepath.Abs(".")
+	binName := "cloudflared"
+	if runtime.GOOS == "windows" {
+		binName = "cloudflared.exe"
+	}
+	path := filepath.Join(exeDir, binName)
+	if _, err := os.Stat(path); err != nil {
+		path = binName
+	}
+	return path
+}
+
+type VersionInfo struct {
+	Version string `json:"version"`
+	Raw     string `json:"raw"`
+}
+
+type UpdateInfo struct {
+	LatestVersion  string `json:"latestVersion"`
+	CurrentVersion string `json:"currentVersion"`
+	HasUpdate      bool   `json:"hasUpdate"`
+	ReleaseURL     string `json:"releaseUrl"`
+}
+
+func (s *Service) GetCloudflaredVersion(ctx context.Context) (*VersionInfo, error) {
+	path := resolveCloudflaredPath()
+	cmd := exec.CommandContext(ctx, path, "version")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to run cloudflared version: %w", err)
+	}
+	raw := strings.TrimSpace(string(out))
+	line := strings.SplitN(raw, "\n", 2)[0]
+	ver := strings.TrimPrefix(line, "cloudflared version ")
+	return &VersionInfo{Version: ver, Raw: raw}, nil
+}
+
+func (s *Service) CheckCloudflaredUpdate(ctx context.Context) (*UpdateInfo, error) {
+	current, err := s.GetCloudflaredVersion(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	req, _ := http.NewRequestWithContext(ctx, "GET", "https://api.github.com/repos/cloudflare/cloudflared/releases/latest", nil)
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check latest release: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var release struct {
+		TagName string `json:"tag_name"`
+		HTMLURL string `json:"html_url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return nil, fmt.Errorf("failed to parse release info: %w", err)
+	}
+
+	latest := strings.TrimPrefix(release.TagName, "v")
+	hasUpdate := latest != current.Version && current.Version != ""
+
+	return &UpdateInfo{
+		LatestVersion:  latest,
+		CurrentVersion: current.Version,
+		HasUpdate:      hasUpdate,
+		ReleaseURL:     release.HTMLURL,
+	}, nil
+}
+
+func (s *Service) UpdateCloudflared(ctx context.Context) (string, error) {
+	path := resolveCloudflaredPath()
+	cmd := exec.CommandContext(ctx, path, "update")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return string(out), fmt.Errorf("update failed: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
 }

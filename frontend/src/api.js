@@ -59,6 +59,7 @@ export default {
   getDomains: (page = 1, perPage = 50) => client.get(`/api/domains?page=${page}&per_page=${perPage}`).then(r => r.data),
   getDNSRecords: (zoneId, page = 1, perPage = 100) => client.get(`/api/dns/records?zone_id=${zoneId}&page=${page}&per_page=${perPage}`).then(r => r.data),
   createDNSRecord: (data) => client.post('/api/dns', data).then(r => r.data),
+  updateDNSRecord: (zoneId, recordId, data) => client.put(`/api/dns/${zoneId}/${recordId}`, data).then(r => r.data),
   deleteDNSRecord: (zoneId, recordId) => client.delete(`/api/dns/${zoneId}/${recordId}`).then(r => r.data),
   getApps: () => client.get('/api/apps').then(r => r.data),
   createApp: (data) => client.post('/api/apps', data).then(r => r.data),
@@ -67,5 +68,10 @@ export default {
   getAppTokens: (id) => client.get(`/api/apps/${id}/tokens`).then(r => r.data),
   createAppToken: (id, data) => client.post(`/api/apps/${id}/tokens`, data).then(r => r.data),
   revokeAppToken: (id, tokenId) => client.delete(`/api/apps/${id}/tokens/${tokenId}`).then(r => r.data),
-  deleteAppToken: (id, tokenId) => client.delete(`/api/apps/${id}/tokens/${tokenId}/purge`).then(r => r.data)
+  deleteAppToken: (id, tokenId) => client.delete(`/api/apps/${id}/tokens/${tokenId}/purge`).then(r => r.data),
+  getCloudflaredVersion: () => client.get('/api/cloudflared/version').then(r => r.data),
+  checkCloudflaredUpdate: () => client.get('/api/cloudflared/check-update').then(r => r.data),
+  updateCloudflared: () => client.post('/api/cloudflared/update').then(r => r.data),
+  getAppVersion: () => client.get('/api/app/version').then(r => r.data),
+  checkAppUpdate: () => client.get('/api/app/check-update').then(r => r.data)
 }

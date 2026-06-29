@@ -91,6 +91,25 @@
             </button>
           </div>
         </div>
+        <div class="sidebar-version">
+          <div class="vb">
+            <div class="vb-top">
+              <span class="vl">CF-Tunnels</span>
+              <a v-if="appUpdate" :href="appUpdate.releaseUrl" target="_blank" class="ub">↑ v{{ appUpdate.latestVersion }}</a>
+            </div>
+            <span class="vv">v{{ appVer || '...' }}</span>
+          </div>
+          <div class="vb">
+            <div class="vb-top">
+              <span class="vl">cloudflared</span>
+              <template v-if="cloudflaredUpdate">
+                <button class="ub up" :disabled="updating" @click="doUpdate">{{ updating ? '...' : '↑' }}</button>
+                <a :href="cloudflaredUpdate.releaseUrl" target="_blank" class="ub">v{{ cloudflaredUpdate.latestVersion }}</a>
+              </template>
+            </div>
+            <span class="vv">{{ cloudflaredVer || '...' }}</span>
+          </div>
+        </div>
       </div>
     </aside>
 
@@ -118,7 +137,7 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api from '../api'
 import { currentUser } from '../auth'
-import { useToast } from '../toast'
+import { useToast, showToast } from '../toast'
 
 const routeTitles = {
   '/': 'Dashboard',
@@ -157,18 +176,46 @@ export default {
       }
     }
 
-    onMounted(() => {
-      document.documentElement.setAttribute('data-theme', theme.value)
-    })
-
     watch(theme, (newTheme) => {
       document.documentElement.setAttribute('data-theme', newTheme)
     })
 
+    const doUpdate = async () => {
+      updating.value = true
+      try {
+        const result = await api.updateCloudflared()
+        showToast(result.message || 'Update completed')
+        cloudflaredUpdate.value = null
+      } catch (e) {
+        showToast('Update failed: ' + (e.response?.data?.error || e.message), 'error')
+      } finally {
+        updating.value = false
+      }
+    }
+
     const accountOpen = ref(false)
+    const cloudflaredVer = ref('')
+    const cloudflaredUpdate = ref(null)
+    const appVer = ref('')
+    const appUpdate = ref(null)
+    const updating = ref(false)
     const { toasts } = useToast()
 
-    return { theme, pageTitle, toggleTheme, displayName, userInitial, logout, toasts, accountOpen }
+    onMounted(async () => {
+      document.documentElement.setAttribute('data-theme', theme.value)
+      const [cfVer, cfUpdate, aVer, aUpdate] = await Promise.allSettled([
+        api.getCloudflaredVersion(),
+        api.checkCloudflaredUpdate(),
+        api.getAppVersion(),
+        api.checkAppUpdate()
+      ])
+      if (cfVer.status === 'fulfilled') cloudflaredVer.value = cfVer.value.version
+      if (cfUpdate.status === 'fulfilled' && cfUpdate.value.hasUpdate) cloudflaredUpdate.value = cfUpdate.value
+      if (aVer.status === 'fulfilled') appVer.value = aVer.value.version
+      if (aUpdate.status === 'fulfilled' && aUpdate.value.hasUpdate) appUpdate.value = aUpdate.value
+    })
+
+    return { theme, pageTitle, toggleTheme, displayName, userInitial, logout, toasts, accountOpen, appVer, cloudflaredVer, cloudflaredUpdate, appUpdate, updating, doUpdate }
   }
 }
 </script>
@@ -322,4 +369,103 @@ export default {
   from { transform: translateX(100%); opacity: 0; }
   to { transform: translateX(0); opacity: 1; }
 }
+
+.sidebar-version {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.625rem 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.vb {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.vb-top {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.vl {
+  color: var(--text-muted);
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.vv {
+  color: var(--text-secondary);
+  font-family: ui-monospace, monospace;
+  font-size: 0.75rem;
+}
+
+.ub {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.05rem 0.3rem;
+  border-radius: 999px;
+  font-size: 0.6rem;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+  border: 1px solid rgba(243, 128, 32, 0.2);
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.ub:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+.ub.up {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+  padding: 0.05rem 0.35rem;
+  cursor: pointer;
+  line-height: 1.3;
+}
+
+.ub.up:disabled { opacity: 0.4; cursor: default; }
+.ub.up:hover:not(:disabled) { opacity: 0.85; }
+
+.update-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.125rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: 999px;
+  background: var(--accent-subtle);
+  border: 1px solid rgba(243, 128, 32, 0.2);
+  color: var(--accent);
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.update-badge:hover {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.update-btn {
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.65rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: opacity 0.12s;
+}
+
+.update-btn:hover:not(:disabled) { opacity: 0.85; }
+.update-btn:disabled { opacity: 0.5; cursor: default; }
 </style>

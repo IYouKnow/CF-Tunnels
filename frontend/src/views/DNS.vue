@@ -7,7 +7,8 @@
       </div>
       <div class="header-actions">
         <button class="btn-secondary" @click="showTutorial = true">API Token Help</button>
-        <button class="btn-primary" @click="refresh">Refresh</button>
+        <button class="btn-primary" @click="openCreateModal">Create Record</button>
+        <button class="btn-secondary" @click="refresh">Refresh</button>
       </div>
     </div>
 
@@ -39,6 +40,69 @@
       </div>
     </div>
 
+    <div v-if="showForm" class="modal-overlay" @mousedown.self="closeForm">
+      <div class="modal">
+        <div class="modal-header">
+          <h2>{{ editingRecord ? 'Edit DNS Record' : 'Create DNS Record' }}</h2>
+          <button class="close-btn" @click="closeForm">&times;</button>
+        </div>
+        <form @submit.prevent="saveRecord">
+          <div class="form-group">
+            <label>Type</label>
+            <select v-model="form.type" required>
+              <option value="A">A</option>
+              <option value="AAAA">AAAA</option>
+              <option value="CNAME">CNAME</option>
+              <option value="TXT">TXT</option>
+              <option value="MX">MX</option>
+              <option value="NS">NS</option>
+              <option value="SRV">SRV</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Name</label>
+            <input v-model="form.name" type="text" placeholder="e.g. www or @ for root" required />
+            <small>Subdomain part only (the zone domain is appended automatically)</small>
+          </div>
+          <div class="form-group">
+            <label>Content</label>
+            <input v-model="form.content" type="text" placeholder="e.g. 192.0.2.1 or target.example.com" required />
+          </div>
+          <div class="form-group" v-if="form.type !== 'TXT'">
+            <label class="toggle-label">
+              <span class="toggle-track">
+                <input v-model="form.proxied" type="checkbox" />
+                <span class="toggle-thumb"></span>
+              </span>
+              <span class="toggle-text">{{ form.proxied ? 'Proxied' : 'DNS Only' }}</span>
+            </label>
+          </div>
+          <div class="modal-actions">
+            <button type="button" class="btn-secondary" @click="closeForm">Cancel</button>
+            <button type="submit" class="btn-primary" :disabled="saving">
+              {{ saving ? 'Saving...' : editingRecord ? 'Update' : 'Create' }}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div v-if="showDeleteConfirm" class="modal-overlay" @mousedown.self="showDeleteConfirm = false">
+      <div class="modal confirm-modal">
+        <div class="modal-header">
+          <h2>Delete DNS Record</h2>
+          <button class="close-btn" @click="showDeleteConfirm = false">&times;</button>
+        </div>
+        <p class="confirm-text">Are you sure you want to delete the DNS record <strong>{{ deletingRecord?.name }}</strong>?</p>
+        <div class="modal-actions">
+          <button class="btn-secondary" @click="showDeleteConfirm = false">Cancel</button>
+          <button class="btn-danger" @click="confirmDelete" :disabled="saving">
+            {{ saving ? 'Deleting...' : 'Delete' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-header">
         <span>DNS Records</span>
@@ -58,6 +122,7 @@
           <div class="col-type">Type</div>
           <div class="col-name">Name</div>
           <div class="col-content">Content</div>
+          <div class="col-proxy">Proxy</div>
           <div class="col-ttl">TTL</div>
           <div class="col-tunnel">Tunnel</div>
           <div class="col-actions"></div>
@@ -66,13 +131,18 @@
           <div class="col-type"><span class="badge type">{{ r.type }}</span></div>
           <div class="col-name"><code>{{ r.name }}</code></div>
           <div class="col-content"><code>{{ r.content }}</code></div>
+          <div class="col-proxy">
+            <span v-if="r.proxied" class="badge proxied" title="Proxied (orange cloud)">&#9679; Proxied</span>
+            <span v-else class="badge unproxied" title="DNS only (gray cloud)">&#9675; DNS Only</span>
+          </div>
           <div class="col-ttl">{{ r.ttl === 1 ? 'Auto' : r.ttl + 's' }}</div>
           <div class="col-tunnel">
             <span v-if="r.tunnel_name" class="tunnel-link" @click="goToTunnel(r.tunnel_name)">{{ r.tunnel_name }}</span>
             <span v-else class="no-domain">-</span>
           </div>
           <div class="col-actions">
-            <button class="btn-action danger" @click="deleteRecord(r.zone_id, r.id, r.name)">✕</button>
+            <button class="btn-action" @click="openEditModal(r)" title="Edit">✎</button>
+            <button class="btn-action danger" @click="deleteRecord(r.zone_id, r.id, r.name)" title="Delete">✕</button>
           </div>
         </div>
       </div>
@@ -96,6 +166,12 @@ export default {
     const loading = ref(false)
     const totalRecords = ref(0)
     const showTutorial = ref(false)
+    const showForm = ref(false)
+    const editingRecord = ref(null)
+    const saving = ref(false)
+    const form = ref({ type: 'CNAME', name: '', content: '', proxied: false })
+    const showDeleteConfirm = ref(false)
+    const deletingRecord = ref(null)
 
     const loadDomains = async () => {
       try {
@@ -123,15 +199,76 @@ export default {
       loading.value = false
     }
 
-    const deleteRecord = async (zoneId, recordId, name) => {
-      if (!confirm(`Delete DNS record "${name}"?`)) return
+    const openCreateModal = () => {
+      editingRecord.value = null
+      form.value = { type: 'CNAME', name: '', content: '', proxied: false }
+      showForm.value = true
+    }
+
+    const openEditModal = (record) => {
+      editingRecord.value = record
+      form.value = {
+        type: record.type,
+        name: record.name,
+        content: record.content,
+        proxied: record.proxied === true
+      }
+      showForm.value = true
+    }
+
+    const closeForm = () => {
+      showForm.value = false
+      editingRecord.value = null
+    }
+
+    const saveRecord = async () => {
+      if (!selectedZone.value) return
+      saving.value = true
       try {
-        await api.deleteDNSRecord(zoneId, recordId)
-        showToast('DNS record deleted')
+        if (editingRecord.value) {
+          await api.updateDNSRecord(selectedZone.value, editingRecord.value.id, {
+            type: form.value.type,
+            name: form.value.name,
+            content: form.value.content,
+            proxied: form.value.type !== 'TXT' ? form.value.proxied : undefined
+          })
+          showToast('DNS record updated')
+        } else {
+          await api.createDNSRecord({
+            zone_id: selectedZone.value,
+            type: form.value.type,
+            name: form.value.name,
+            content: form.value.content,
+            proxied: form.value.type !== 'TXT' ? form.value.proxied : false
+          })
+          showToast('DNS record created')
+        }
+        closeForm()
         loadRecords()
       } catch (e) {
         showToast(e.response?.data?.error || e.message, 'error')
       }
+      saving.value = false
+    }
+
+    const deleteRecord = (zoneId, recordId, name) => {
+      deletingRecord.value = { zone_id: zoneId, id: recordId, name }
+      showDeleteConfirm.value = true
+    }
+
+    const confirmDelete = async () => {
+      if (!deletingRecord.value) return
+      saving.value = true
+      try {
+        await api.deleteDNSRecord(deletingRecord.value.zone_id, deletingRecord.value.id)
+        showToast('DNS record deleted')
+        showDeleteConfirm.value = false
+        deletingRecord.value = null
+        loadRecords()
+      } catch (e) {
+        showToast(e.response?.data?.error || e.message, 'error')
+      }
+      saving.value = false
     }
 
     const refresh = () => {
@@ -145,7 +282,13 @@ export default {
 
     onMounted(loadDomains)
 
-    return { domains, records, selectedZone, loading, totalRecords, showTutorial, loadRecords, deleteRecord, refresh, goToTunnel }
+    return {
+      domains, records, selectedZone, loading, totalRecords, showTutorial,
+      showForm, editingRecord, saving, form,
+      showDeleteConfirm, deletingRecord,
+      loadRecords, openCreateModal, openEditModal, closeForm, saveRecord,
+      deleteRecord, confirmDelete, refresh, goToTunnel
+    }
   }
 }
 </script>
@@ -187,13 +330,13 @@ export default {
 
 .record-count { font-size: 0.85rem; color: var(--text-secondary); }
 
-.table-header, .table-row {
-  display: grid;
-  grid-template-columns: 70px 2fr 2.5fr 80px 1.5fr 40px;
-  gap: 1rem;
-  padding: 0.75rem 1.25rem;
-  align-items: center;
-}
+  .table-header, .table-row {
+    display: grid;
+    grid-template-columns: 70px 2fr 2.5fr 90px 80px 1.5fr 80px;
+    gap: 1rem;
+    padding: 0.75rem 1.25rem;
+    align-items: center;
+  }
 
 .table-header {
   background: var(--bg-tertiary);
@@ -221,6 +364,24 @@ export default {
   border-radius: 4px;
   font-weight: 600;
   letter-spacing: 0.5px;
+}
+
+.badge.proxied {
+  font-size: 0.7rem;
+  padding: 0.15rem 0.5rem;
+  background: rgba(243, 128, 32, 0.12);
+  color: var(--accent);
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.badge.unproxied {
+  font-size: 0.7rem;
+  padding: 0.15rem 0.5rem;
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  border-radius: 4px;
+  font-weight: 600;
 }
 
 .col-name code, .col-content code {
@@ -311,6 +472,39 @@ export default {
 
 .close-btn:hover { color: var(--text-primary); }
 
+.confirm-text {
+  margin: 1rem 0 1.5rem;
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.confirm-text strong {
+  color: var(--text-primary);
+}
+
+.btn-danger {
+  background: var(--error);
+  color: white;
+  border: none;
+  padding: 0.5rem 1rem;
+  border-radius: var(--radius-md);
+  font-weight: 500;
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: background 0.15s;
+  line-height: 1.4;
+}
+
+.btn-danger:hover {
+  background: #dc2626;
+}
+
+.btn-danger:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .tutorial-content .intro { margin-bottom: 1rem; color: var(--text-secondary); }
 .permissions-list { background: var(--bg-tertiary); border-radius: 8px; padding: 1rem; margin-bottom: 1rem; border: 1px solid var(--border); }
 .permissions-list h3 { font-size: 0.95rem; margin-bottom: 0.75rem; }
@@ -320,6 +514,96 @@ export default {
 .steps h3 { font-size: 0.95rem; margin-bottom: 0.75rem; }
 .steps ol { padding-left: 1.25rem; }
 .steps li { margin-bottom: 0.5rem; font-size: 0.9rem; line-height: 1.5; }
+
+.toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.toggle-track {
+  position: relative;
+  width: 40px;
+  height: 22px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  transition: background 0.2s, border-color 0.2s;
+  flex-shrink: 0;
+}
+
+.toggle-track input {
+  position: absolute;
+  opacity: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  cursor: pointer;
+  z-index: 1;
+}
+
+.toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  background: var(--text-muted);
+  border-radius: 50%;
+  transition: transform 0.2s, background 0.2s;
+  pointer-events: none;
+}
+
+.toggle-track:has(input:checked) {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.toggle-track:has(input:checked) .toggle-thumb {
+  transform: translateX(18px);
+  background: white;
+}
+
+.toggle-text {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.btn-action {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.85rem;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s;
+  line-height: 1.4;
+}
+
+.btn-action:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border-color: var(--border-light);
+}
+
+.btn-action.danger {
+  color: var(--error);
+  border-color: transparent;
+}
+
+.btn-action.danger:hover {
+  background: var(--error-subtle);
+  border-color: var(--error);
+}
+
+.col-actions {
+  display: flex;
+  gap: 0.375rem;
+}
 
 @media (max-width: 768px) {
   .table-header, .table-row {
