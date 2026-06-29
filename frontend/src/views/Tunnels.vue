@@ -48,7 +48,7 @@
               <button class="dropdown-item" @click="openEditModal(tunnel)">Edit</button>
               <button v-if="tunnel.status === 'stopped'" class="dropdown-item" @click="startTunnel(tunnel.id)">Start</button>
               <button v-else class="dropdown-item" @click="stopTunnel(tunnel.id)">Stop</button>
-              <button class="dropdown-item danger" @click="deleteTunnel(tunnel.id)">Delete</button>
+              <button class="dropdown-item danger" @click="deleteTunnel(tunnel)">Delete</button>
             </div>
           </div>
         </div>
@@ -111,6 +111,16 @@
         </form>
       </div>
     </div>
+
+    <ConfirmModal
+      :show="showDeleteConfirm"
+      title="Delete Tunnel"
+      :message="`Are you sure you want to delete tunnel &quot;${deletingTunnelName}&quot;?`"
+      confirm-text="Delete"
+      danger
+      @confirm="doDeleteTunnel"
+      @cancel="showDeleteConfirm = false"
+    />
   </div>
 </template>
 
@@ -118,9 +128,11 @@
 import { ref, onMounted, onUnmounted, computed } from 'vue'
 import api from '../api'
 import { showToast } from '../toast'
+import ConfirmModal from '../components/ConfirmModal.vue'
 
 export default {
   name: 'Tunnels',
+  components: { ConfirmModal },
   setup() {
     const tunnels = ref([])
     const domains = ref([])
@@ -129,6 +141,9 @@ export default {
     const editTarget = ref(null)
     const editName = ref('')
     const newTunnel = ref({ name: '', account_id: '', zone_id: '', subdomain: '', address: '' })
+    const showDeleteConfirm = ref(false)
+    const deletingTunnelId = ref(null)
+    const deletingTunnelName = ref('')
     const currentPage = ref(1)
     const perPage = ref(20)
     const totalTunnels = ref(0)
@@ -266,14 +281,22 @@ export default {
       }
     }
 
-    const deleteTunnel = async (id) => {
-      if (confirm('Are you sure you want to delete this tunnel?')) {
-        try {
-          await api.deleteTunnel(id)
-          loadTunnels()
-        } catch (e) {
-          showToast(e.response?.data?.error || e.message, 'error')
-        }
+    const deleteTunnel = (tunnel) => {
+      deletingTunnelId.value = tunnel.id
+      deletingTunnelName.value = tunnel.name
+      showDeleteConfirm.value = true
+    }
+
+    const doDeleteTunnel = async () => {
+      if (deletingTunnelId.value == null) return
+      try {
+        await api.deleteTunnel(deletingTunnelId.value)
+        showDeleteConfirm.value = false
+        deletingTunnelId.value = null
+        deletingTunnelName.value = ''
+        loadTunnels()
+      } catch (e) {
+        showToast(e.response?.data?.error || e.message, 'error')
       }
     }
 
@@ -305,7 +328,11 @@ export default {
       createTunnel, 
       startTunnel, 
       stopTunnel, 
-      deleteTunnel, 
+      deleteTunnel,
+      doDeleteTunnel,
+      showDeleteConfirm,
+      deletingTunnelId,
+      deletingTunnelName,
       selectedDomainName,
       getDomainName,
       currentPage,

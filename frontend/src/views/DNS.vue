@@ -87,21 +87,17 @@
       </div>
     </div>
 
-    <div v-if="showDeleteConfirm" class="modal-overlay" @mousedown.self="showDeleteConfirm = false">
-      <div class="modal confirm-modal">
-        <div class="modal-header">
-          <h2>Delete DNS Record</h2>
-          <button class="close-btn" @click="showDeleteConfirm = false">&times;</button>
-        </div>
-        <p class="confirm-text">Are you sure you want to delete the DNS record <strong>{{ deletingRecord?.name }}</strong>?</p>
-        <div class="modal-actions">
-          <button class="btn-secondary" @click="showDeleteConfirm = false">Cancel</button>
-          <button class="btn-danger" @click="confirmDelete" :disabled="saving">
-            {{ saving ? 'Deleting...' : 'Delete' }}
-          </button>
-        </div>
-      </div>
-    </div>
+    <ConfirmModal
+      :show="showDeleteConfirm"
+      title="Delete DNS Record"
+      :message="deletingRecord ? `Are you sure you want to delete the DNS record &quot;${deletingRecord.name}&quot;?` : ''"
+      confirm-text="Delete"
+      danger
+      :loading="saving"
+      loading-text="Deleting..."
+      @confirm="confirmDelete"
+      @cancel="showDeleteConfirm = false"
+    />
 
     <div class="card">
       <div class="card-header">
@@ -125,7 +121,7 @@
           <div class="col-proxy">Proxy</div>
           <div class="col-ttl">TTL</div>
           <div class="col-tunnel">Tunnel</div>
-          <div class="col-actions"></div>
+          <div class="col-actions">Actions</div>
         </div>
         <div v-for="r in records" :key="r.id" class="table-row">
           <div class="col-type"><span class="badge type">{{ r.type }}</span></div>
@@ -141,8 +137,8 @@
             <span v-else class="no-domain">-</span>
           </div>
           <div class="col-actions">
-            <button class="btn-action" @click="openEditModal(r)" title="Edit">✎</button>
-            <button class="btn-action danger" @click="deleteRecord(r.zone_id, r.id, r.name)" title="Delete">✕</button>
+            <button class="btn-icon" @click="openEditModal(r)" title="Edit"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4Z"/></svg></button>
+            <button class="btn-icon danger" @click="deleteRecord(r.zone_id, r.id, r.name)" title="Delete"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg></button>
           </div>
         </div>
       </div>
@@ -155,9 +151,11 @@ import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '../api'
 import { showToast } from '../toast'
+import ConfirmModal from '../components/ConfirmModal.vue'
 
 export default {
   name: 'DNS',
+  components: { ConfirmModal },
   setup() {
     const router = useRouter()
     const domains = ref([])
@@ -406,22 +404,6 @@ export default {
 
 .no-domain { color: var(--text-secondary); }
 
-.btn-action.danger {
-  background: none;
-  border: none;
-  color: var(--text-secondary);
-  font-size: 1rem;
-  cursor: pointer;
-  padding: 0.25rem;
-  border-radius: 4px;
-  transition: all 0.15s;
-}
-
-.btn-action.danger:hover {
-  color: var(--error);
-  background: rgba(239, 68, 68, 0.1);
-}
-
 .empty {
   padding: 2.5rem;
   text-align: center;
@@ -471,39 +453,6 @@ export default {
 }
 
 .close-btn:hover { color: var(--text-primary); }
-
-.confirm-text {
-  margin: 1rem 0 1.5rem;
-  font-size: 0.9rem;
-  color: var(--text-secondary);
-  line-height: 1.5;
-}
-
-.confirm-text strong {
-  color: var(--text-primary);
-}
-
-.btn-danger {
-  background: var(--error);
-  color: white;
-  border: none;
-  padding: 0.5rem 1rem;
-  border-radius: var(--radius-md);
-  font-weight: 500;
-  font-size: 0.875rem;
-  cursor: pointer;
-  transition: background 0.15s;
-  line-height: 1.4;
-}
-
-.btn-danger:hover {
-  background: #dc2626;
-}
-
-.btn-danger:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
 
 .tutorial-content .intro { margin-bottom: 1rem; color: var(--text-secondary); }
 .permissions-list { background: var(--bg-tertiary); border-radius: 8px; padding: 1rem; margin-bottom: 1rem; border: 1px solid var(--border); }
@@ -572,37 +521,36 @@ export default {
   font-weight: 500;
 }
 
-.btn-action {
-  padding: 0.25rem 0.5rem;
-  font-size: 0.85rem;
+.btn-icon {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: transparent;
-  border: 1px solid var(--border);
+  border: 1px solid transparent;
   border-radius: var(--radius-sm);
-  color: var(--text-secondary);
+  color: var(--text-muted);
   cursor: pointer;
   transition: all 0.15s;
-  line-height: 1.4;
 }
 
-.btn-action:hover {
+.btn-icon:hover {
   background: var(--bg-tertiary);
   color: var(--text-primary);
   border-color: var(--border-light);
 }
 
-.btn-action.danger {
+.btn-icon.danger:hover {
   color: var(--error);
-  border-color: transparent;
-}
-
-.btn-action.danger:hover {
   background: var(--error-subtle);
   border-color: var(--error);
 }
 
 .col-actions {
   display: flex;
-  gap: 0.375rem;
+  gap: 0.25rem;
+  align-items: center;
 }
 
 @media (max-width: 768px) {

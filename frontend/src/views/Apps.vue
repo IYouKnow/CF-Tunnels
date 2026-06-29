@@ -177,6 +177,33 @@
         </form>
       </div>
     </div>
+    <ConfirmModal
+      :show="showRevokeConfirm"
+      title="Revoke Token"
+      message="Revoke this token? It will stop working immediately."
+      confirm-text="Revoke"
+      danger
+      @confirm="doRevokeToken"
+      @cancel="showRevokeConfirm = false"
+    />
+    <ConfirmModal
+      :show="showDeleteTokenConfirm"
+      title="Delete Token"
+      message="Permanently delete this token? This cannot be undone."
+      confirm-text="Delete"
+      danger
+      @confirm="doDeleteToken"
+      @cancel="showDeleteTokenConfirm = false"
+    />
+    <ConfirmModal
+      :show="showDeleteAppConfirm"
+      :title="'Delete App'"
+      :message="selectedApp ? `Delete app &quot;${selectedApp.name}&quot;? All its tokens will be revoked.` : ''"
+      confirm-text="Delete"
+      danger
+      @confirm="doDeleteApp"
+      @cancel="showDeleteAppConfirm = false"
+    />
   </div>
 </template>
 
@@ -185,10 +212,11 @@ import { ref, onMounted } from 'vue'
 import api from '../api'
 import { APP_SCOPE_OPTIONS, APP_SCOPE_PRESETS } from '../constants/appScopes'
 import { X, Copy, Check } from '@lucide/vue'
+import ConfirmModal from '../components/ConfirmModal.vue'
 
 export default {
   name: 'Apps',
-  components: { X, Copy, Check },
+  components: { X, Copy, Check, ConfirmModal },
   setup () {
     const apps = ref([])
     const selectedApp = ref(null)
@@ -203,6 +231,11 @@ export default {
     const copied = ref(false)
     const copiedPrefix = ref(null)
     const scopeOptions = APP_SCOPE_OPTIONS
+    const showRevokeConfirm = ref(false)
+    const revokingTokenId = ref(null)
+    const showDeleteTokenConfirm = ref(false)
+    const deletingTokenId = ref(null)
+    const showDeleteAppConfirm = ref(false)
 
     const newApp = ref({
       name: '',
@@ -313,24 +346,40 @@ export default {
       }
     }
 
-    const revokeToken = async (tokenId) => {
-      if (!selectedApp.value) return
-      if (!confirm('Revoke this token? It will stop working immediately.')) return
-      await api.revokeAppToken(selectedApp.value.id, tokenId)
+    const revokeToken = (tokenId) => {
+      revokingTokenId.value = tokenId
+      showRevokeConfirm.value = true
+    }
+
+    const doRevokeToken = async () => {
+      if (!selectedApp.value || !revokingTokenId.value) return
+      await api.revokeAppToken(selectedApp.value.id, revokingTokenId.value)
+      showRevokeConfirm.value = false
+      revokingTokenId.value = null
       await loadTokens(selectedApp.value.id)
     }
 
-    const deleteToken = async (tokenId) => {
-      if (!selectedApp.value) return
-      if (!confirm('Permanently delete this token? This cannot be undone.')) return
-      await api.deleteAppToken(selectedApp.value.id, tokenId)
+    const deleteToken = (tokenId) => {
+      deletingTokenId.value = tokenId
+      showDeleteTokenConfirm.value = true
+    }
+
+    const doDeleteToken = async () => {
+      if (!selectedApp.value || !deletingTokenId.value) return
+      await api.deleteAppToken(selectedApp.value.id, deletingTokenId.value)
+      showDeleteTokenConfirm.value = false
+      deletingTokenId.value = null
       await loadTokens(selectedApp.value.id)
     }
 
-    const deleteSelectedApp = async () => {
+    const deleteSelectedApp = () => {
+      showDeleteAppConfirm.value = true
+    }
+
+    const doDeleteApp = async () => {
       if (!selectedApp.value) return
-      if (!confirm(`Delete app "${selectedApp.value.name}"?`)) return
       await api.deleteApp(selectedApp.value.id)
+      showDeleteAppConfirm.value = false
       selectedApp.value = null
       tokens.value = []
       tokenReveal.value = null
@@ -344,7 +393,10 @@ export default {
       showCreateApp, showCreateToken, newApp, newToken,
       appError, tokenError,       tokenReveal, copied, copiedPrefix, scopeOptions,
       formatTime, applyScopePreset, selectApp, copyToken, copyPrefix,
-      submitCreateApp, submitCreateToken, revokeToken, deleteToken, deleteSelectedApp
+      submitCreateApp, submitCreateToken,
+      revokeToken, doRevokeToken, showRevokeConfirm,
+      deleteToken, doDeleteToken, showDeleteTokenConfirm,
+      deleteSelectedApp, doDeleteApp, showDeleteAppConfirm
     }
   }
 }
