@@ -152,6 +152,7 @@ import { useRouter } from 'vue-router'
 import api from '../api'
 import { showToast } from '../toast'
 import ConfirmModal from '../components/ConfirmModal.vue'
+import { useKeyboardShortcuts } from '../composables/useKeyboardShortcuts'
 
 export default {
   name: 'DNS',
@@ -279,6 +280,16 @@ export default {
     }
 
     onMounted(loadDomains)
+
+    useKeyboardShortcuts({
+      'Ctrl+N': () => { openCreateModal() },
+      'Ctrl+R': () => { refresh() },
+      'Escape': () => {
+        showForm.value = false
+        showTutorial.value = false
+        showDeleteConfirm.value = false
+      }
+    })
 
     return {
       domains, records, selectedZone, loading, totalRecords, showTutorial,

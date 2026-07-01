@@ -106,6 +106,7 @@
 <script>
 import { ref, onMounted } from 'vue'
 import api from '../api'
+import { useKeyboardShortcuts } from '../composables/useKeyboardShortcuts'
 
 export default {
   name: 'Dashboard',
@@ -134,6 +135,11 @@ export default {
     }
 
     onMounted(loadData)
+
+    useKeyboardShortcuts({
+      'Ctrl+R': () => { loadData() }
+    })
+
     return { status, tunnels, domains, getDomainName }
   }
 }

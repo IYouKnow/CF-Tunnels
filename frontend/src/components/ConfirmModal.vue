@@ -17,6 +17,8 @@
 </template>
 
 <script>
+import { onMounted, onUnmounted } from 'vue'
+
 export default {
   name: 'ConfirmModal',
   props: {
@@ -29,7 +31,17 @@ export default {
     disabled: Boolean,
     loading: Boolean
   },
-  emits: ['confirm', 'cancel']
+  emits: ['confirm', 'cancel'],
+  setup (props, { emit }) {
+    function onKeyDown(e) {
+      if (e.key === 'Enter' && props.show && !props.disabled) {
+        emit('confirm')
+      }
+    }
+
+    onMounted(() => window.addEventListener('keydown', onKeyDown))
+    onUnmounted(() => window.removeEventListener('keydown', onKeyDown))
+  }
 }
 </script>
 

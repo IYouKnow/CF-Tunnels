@@ -54,6 +54,7 @@
 <script>
 import { ref, onMounted, onUnmounted } from 'vue'
 import api from '../api'
+import { useKeyboardShortcuts } from '../composables/useKeyboardShortcuts'
 
 export default {
   name: 'Logs',
@@ -123,6 +124,10 @@ export default {
       if (refreshInterval) {
         clearInterval(refreshInterval)
       }
+    })
+
+    useKeyboardShortcuts({
+      'Ctrl+R': () => { loadLogs() }
     })
 
     return { logs, tunnels, selectedTunnel, loadLogs, getTunnelName, formatTime, loading, loadError }

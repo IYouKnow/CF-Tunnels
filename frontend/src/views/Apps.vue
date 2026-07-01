@@ -213,6 +213,7 @@ import api from '../api'
 import { APP_SCOPE_OPTIONS, APP_SCOPE_PRESETS } from '../constants/appScopes'
 import { X, Copy, Check } from '@lucide/vue'
 import ConfirmModal from '../components/ConfirmModal.vue'
+import { useKeyboardShortcuts } from '../composables/useKeyboardShortcuts'
 
 export default {
   name: 'Apps',
@@ -387,6 +388,18 @@ export default {
     }
 
     onMounted(loadApps)
+
+    useKeyboardShortcuts({
+      'Ctrl+N': () => { showCreateApp.value = true },
+      'Ctrl+R': () => { loadApps() },
+      'Escape': () => {
+        showCreateApp.value = false
+        showCreateToken.value = false
+        showRevokeConfirm.value = false
+        showDeleteTokenConfirm.value = false
+        showDeleteAppConfirm.value = false
+      }
+    })
 
     return {
       apps, selectedApp, tokens, loadingApps, loadingTokens,

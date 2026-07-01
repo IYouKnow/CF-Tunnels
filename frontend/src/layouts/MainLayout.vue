@@ -138,6 +138,7 @@ import { useRoute, useRouter } from 'vue-router'
 import api from '../api'
 import { currentUser } from '../auth'
 import { useToast, showToast } from '../toast'
+import { useKeyboardShortcuts } from '../composables/useKeyboardShortcuts'
 
 const routeTitles = {
   '/': 'Dashboard',
@@ -213,6 +214,10 @@ export default {
       if (cfUpdate.status === 'fulfilled' && cfUpdate.value.hasUpdate) cloudflaredUpdate.value = cfUpdate.value
       if (aVer.status === 'fulfilled') appVer.value = aVer.value.version
       if (aUpdate.status === 'fulfilled' && aUpdate.value.hasUpdate) appUpdate.value = aUpdate.value
+    })
+
+    useKeyboardShortcuts({
+      'Escape': () => { accountOpen.value = false }
     })
 
     return { theme, pageTitle, toggleTheme, displayName, userInitial, logout, toasts, accountOpen, appVer, cloudflaredVer, cloudflaredUpdate, appUpdate, updating, doUpdate }

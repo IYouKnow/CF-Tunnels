@@ -6,7 +6,7 @@
         <p class="subtitle">Manage your Cloudflare Tunnels</p>
       </div>
       <div class="header-actions">
-        <input v-model="searchQuery" type="text" placeholder="Search tunnels..." class="search-input" />
+        <input ref="searchInput" v-model="searchQuery" type="text" placeholder="Search tunnels..." class="search-input" />
         <button class="btn-secondary" @click="syncTunnels" :disabled="syncing">{{ syncing ? 'Syncing...' : 'Sync' }}</button>
         <button class="btn-primary" @click="showCreateModal = true">+ New Tunnel</button>
       </div>
@@ -126,6 +126,7 @@
 
 <script>
 import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
+import { useKeyboardShortcuts } from '../composables/useKeyboardShortcuts'
 import { useRoute } from 'vue-router'
 import api from '../api'
 import { showToast } from '../toast'
@@ -340,6 +341,20 @@ export default {
       window.addEventListener('click', closeDropdown)
     }
 
+    const searchInput = ref(null)
+
+    useKeyboardShortcuts({
+      'Ctrl+N': () => { showCreateModal.value = true },
+      'Ctrl+F': () => { searchInput.value?.focus() },
+      'Ctrl+R': () => { loadTunnels() },
+      'Escape': () => {
+        showCreateModal.value = false
+        showEditModal.value = false
+        showDeleteConfirm.value = false
+        openDropdown.value = null
+      }
+    })
+
     return { 
       tunnels, 
       filteredTunnels,
@@ -363,6 +378,7 @@ export default {
       nextPage,
       prevPage,
       searchQuery,
+      searchInput,
       highlightedTunnel,
       syncing,
       syncTunnels,
