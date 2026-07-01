@@ -479,12 +479,20 @@ body {
   color: var(--error);
 }
 
+.sidebar-overlay {
+  display: none;
+}
+
 @media (max-width: 768px) {
-  .sidebar {
-    width: 200px;
+  .sidebar-overlay {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 150;
+    background: rgba(0,0,0,0.5);
   }
   .main-wrapper {
-    margin-left: 200px;
+    margin-left: 0;
   }
 }
 </style>

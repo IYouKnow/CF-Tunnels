@@ -1,6 +1,7 @@
 <template>
   <div class="app" :class="theme">
-    <aside class="sidebar">
+    <div v-if="sidebarOpen" class="sidebar-overlay" @click="sidebarOpen = false" />
+    <aside class="sidebar" :class="{ open: sidebarOpen }">
       <div class="sidebar-header">
         <div class="brand">
           <span>CF Tunnels</span>
@@ -115,7 +116,16 @@
 
     <main class="main-wrapper">
       <header class="topbar">
-        <h1 class="page-title">{{ pageTitle }}</h1>
+        <div class="topbar-left">
+          <button class="hamburger" @click="sidebarOpen = !sidebarOpen" aria-label="Toggle navigation">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20">
+              <line x1="3" y1="6" x2="21" y2="6" />
+              <line x1="3" y1="12" x2="21" y2="12" />
+              <line x1="3" y1="18" x2="21" y2="18" />
+            </svg>
+          </button>
+          <h1 class="page-title">{{ pageTitle }}</h1>
+        </div>
         <div class="topbar-actions">
           <slot name="actions"/>
         </div>
@@ -181,6 +191,10 @@ export default {
       document.documentElement.setAttribute('data-theme', newTheme)
     })
 
+    watch(() => route.path, () => {
+      sidebarOpen.value = false
+    })
+
     const doUpdate = async () => {
       updating.value = true
       try {
@@ -194,6 +208,7 @@ export default {
       }
     }
 
+    const sidebarOpen = ref(false)
     const accountOpen = ref(false)
     const cloudflaredVer = ref('')
     const cloudflaredUpdate = ref(null)
@@ -220,7 +235,7 @@ export default {
       'Escape': () => { accountOpen.value = false }
     })
 
-    return { theme, pageTitle, toggleTheme, displayName, userInitial, logout, toasts, accountOpen, appVer, cloudflaredVer, cloudflaredUpdate, appUpdate, updating, doUpdate }
+    return { theme, pageTitle, toggleTheme, displayName, userInitial, logout, toasts, sidebarOpen, accountOpen, appVer, cloudflaredVer, cloudflaredUpdate, appUpdate, updating, doUpdate }
   }
 }
 </script>
@@ -473,4 +488,47 @@ export default {
 
 .update-btn:hover:not(:disabled) { opacity: 0.85; }
 .update-btn:disabled { opacity: 0.5; cursor: default; }
+
+.hamburger {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 0.25rem;
+  border-radius: var(--radius-sm);
+}
+
+.hamburger:hover {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+}
+
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+@media (max-width: 768px) {
+  .hamburger {
+    display: inline-flex;
+  }
+  .sidebar {
+    transform: translateX(-100%);
+    z-index: 200;
+    transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .sidebar.open {
+    transform: translateX(0);
+  }
+}
+
+@media (max-width: 480px) {
+  .sidebar {
+    width: 260px;
+  }
+}
 </style>

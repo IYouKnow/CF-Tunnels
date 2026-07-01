@@ -499,6 +499,7 @@ func main() {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
+	r.Use(cspMiddleware())
 	r.Use(corsMiddleware())
 
 	r.Use(authMiddleware())
@@ -548,6 +549,7 @@ func main() {
 
 	v1 := gin.New()
 	v1.Use(gin.Recovery())
+	v1.Use(cspMiddleware())
 	v1.Use(corsMiddleware())
 	// TODO: Extend this group with app-token-protected central API routes as tunnel/DNS
 	// orchestration is exposed to other internal apps.
@@ -588,6 +590,8 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
+	tunnelSvc.StopAll()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	srv.Shutdown(ctx)
@@ -616,6 +620,21 @@ func corsMiddleware() gin.HandlerFunc {
 			c.AbortWithStatus(http.StatusNoContent)
 			return
 		}
+		c.Next()
+	}
+}
+
+func cspMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Content-Security-Policy",
+			"default-src 'self'; "+
+				"script-src 'self'; "+
+				"style-src 'self' 'unsafe-inline'; "+
+				"img-src 'self' data:; "+
+				"font-src 'self'; "+
+				"connect-src 'self'; "+
+				"form-action 'self'; "+
+				"frame-ancestors 'none'")
 		c.Next()
 	}
 }
@@ -1026,6 +1045,26 @@ func createIngressRule(c *gin.Context) {
 	var r IngressRule
 	if err := c.ShouldBindJSON(&r); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if r.TunnelID == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "tunnel_id is required"})
+		return
+	}
+	if strings.TrimSpace(r.Hostname) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "hostname is required"})
+		return
+	}
+	if strings.TrimSpace(r.Service) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "service is required"})
+		return
+	}
+
+	var exists bool
+	db.QueryRow("SELECT EXISTS(SELECT 1 FROM tunnels WHERE id = ?)", r.TunnelID).Scan(&exists)
+	if !exists {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "tunnel not found"})
 		return
 	}
 

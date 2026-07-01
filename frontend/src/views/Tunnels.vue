@@ -54,8 +54,8 @@
             <button class="dropdown-trigger" @click="toggleDropdown(tunnel.id)">⋮</button>
             <div v-if="openDropdown === tunnel.id" class="dropdown-menu" @click="openDropdown = null">
               <button class="dropdown-item" @click="openEditModal(tunnel)">Edit</button>
-              <button v-if="tunnel.status === 'stopped'" class="dropdown-item" @click="startTunnel(tunnel.id)">Start</button>
-              <button v-else class="dropdown-item" @click="stopTunnel(tunnel.id)">Stop</button>
+              <button v-if="tunnel.status === 'stopped'" class="dropdown-item" @click="promptStart(tunnel.id)">Start</button>
+              <button v-else class="dropdown-item" @click="promptStop(tunnel.id)">Stop</button>
               <button class="dropdown-item danger" @click="deleteTunnel(tunnel)">Delete</button>
             </div>
           </div>
@@ -121,6 +121,23 @@
     </div>
 
     <ConfirmModal
+      :show="showStartConfirm"
+      title="Start Tunnel"
+      :message="`Start tunnel &quot;${actionTunnelName}&quot;?`"
+      confirm-text="Start"
+      @confirm="doStartTunnel"
+      @cancel="showStartConfirm = false"
+    />
+    <ConfirmModal
+      :show="showStopConfirm"
+      title="Stop Tunnel"
+      :message="`Stop tunnel &quot;${actionTunnelName}&quot;? Connections will be dropped.`"
+      confirm-text="Stop"
+      danger
+      @confirm="doStopTunnel"
+      @cancel="showStopConfirm = false"
+    />
+    <ConfirmModal
       :show="showDeleteConfirm"
       title="Delete Tunnel"
       :message="`Are you sure you want to delete tunnel &quot;${deletingTunnelName}&quot;?`"
@@ -157,6 +174,10 @@ export default {
     const showDeleteConfirm = ref(false)
     const deletingTunnelId = ref(null)
     const deletingTunnelName = ref('')
+    const showStartConfirm = ref(false)
+    const showStopConfirm = ref(false)
+    const actionTunnelId = ref(null)
+    const actionTunnelName = ref('')
     const currentPage = ref(1)
     const perPage = ref(20)
     const totalTunnels = ref(0)
@@ -291,18 +312,32 @@ export default {
       }
     }
 
-    const startTunnel = async (id) => {
+    const promptStart = (id) => {
+      actionTunnelId.value = id
+      actionTunnelName.value = tunnels.value.find(t => t.id === id)?.name || ''
+      showStartConfirm.value = true
+    }
+
+    const promptStop = (id) => {
+      actionTunnelId.value = id
+      actionTunnelName.value = tunnels.value.find(t => t.id === id)?.name || ''
+      showStopConfirm.value = true
+    }
+
+    const doStartTunnel = async () => {
+      showStartConfirm.value = false
       try {
-        await api.startTunnel(id)
+        await api.startTunnel(actionTunnelId.value)
         loadTunnels()
       } catch (e) {
         showToast(e.response?.data?.error || e.message, 'error')
       }
     }
 
-    const stopTunnel = async (id) => {
+    const doStopTunnel = async () => {
+      showStopConfirm.value = false
       try {
-        await api.stopTunnel(id)
+        await api.stopTunnel(actionTunnelId.value)
         loadTunnels()
       } catch (e) {
         showToast(e.response?.data?.error || e.message, 'error')
@@ -382,8 +417,12 @@ export default {
       editName,
       newTunnel, 
       createTunnel, 
-      startTunnel, 
-      stopTunnel, 
+      showStartConfirm,
+      showStopConfirm,
+      promptStart,
+      promptStop,
+      doStartTunnel,
+      doStopTunnel,
       deleteTunnel,
       doDeleteTunnel,
       showDeleteConfirm,
@@ -399,6 +438,7 @@ export default {
       searchInput,
       highlightedTunnel,
       loading,
+      actionTunnelName,
       syncing,
       syncTunnels,
       openDropdown,

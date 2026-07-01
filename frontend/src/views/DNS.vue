@@ -107,12 +107,13 @@
             <option value="">{{ loadingDomains ? 'Loading domains…' : 'Select a domain' }}</option>
             <option v-for="d in domains" :key="d.id" :value="d.id">{{ d.name }}</option>
           </select>
-          <div v-if="totalRecords" class="record-count">{{ totalRecords }} records</div>
+          <div v-if="totalRecords" class="record-count">{{ filteredRecords.length }} / {{ totalRecords }} records</div>
+          <input v-model="dnsSearch" type="text" class="search-input" placeholder="Filter records…" />
         </div>
       </div>
       <div v-if="!selectedZone" class="empty">Select a domain above to view its DNS records</div>
       <div v-else-if="loading" class="empty">Loading records...</div>
-      <div v-else-if="records.length === 0" class="empty">No DNS records found for this zone</div>
+      <div v-else-if="filteredRecords.length === 0" class="empty">No DNS records found for this zone</div>
       <div v-else>
         <div class="table-header">
           <div class="col-type">Type</div>
@@ -123,7 +124,7 @@
           <div class="col-tunnel">Tunnel</div>
           <div class="col-actions">Actions</div>
         </div>
-        <div v-for="r in records" :key="r.id" class="table-row">
+        <div v-for="r in filteredRecords" :key="r.id" class="table-row">
           <div class="col-type"><span class="badge type">{{ r.type }}</span></div>
           <div class="col-name"><code>{{ r.name }}</code></div>
           <div class="col-content"><code>{{ r.content }}</code></div>
@@ -172,6 +173,17 @@ export default {
     const form = ref({ type: 'CNAME', name: '', content: '', proxied: false })
     const showDeleteConfirm = ref(false)
     const deletingRecord = ref(null)
+    const dnsSearch = ref('')
+
+    const filteredRecords = computed(() => {
+      const q = dnsSearch.value.toLowerCase().trim()
+      if (!q) return records.value
+      return records.value.filter(r =>
+        r.name.toLowerCase().includes(q) ||
+        r.content.toLowerCase().includes(q) ||
+        r.type.toLowerCase().includes(q)
+      )
+    })
 
     const loadDomains = async () => {
       loadingDomains.value = true
@@ -294,7 +306,7 @@ export default {
     })
 
     return {
-      domains, records, selectedZone, loading, loadingDomains, totalRecords, showTutorial,
+      domains, records, selectedZone, loading, loadingDomains, totalRecords, showTutorial, dnsSearch, filteredRecords,
       showForm, editingRecord, saving, form,
       showDeleteConfirm, deletingRecord,
       loadRecords, openCreateModal, openEditModal, closeForm, saveRecord,
@@ -340,6 +352,26 @@ export default {
 }
 
 .record-count { font-size: 0.85rem; color: var(--text-secondary); }
+
+.search-input {
+  padding: 0.4rem 0.65rem;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  width: 180px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.search-input:focus {
+  border-color: var(--accent);
+}
+
+.search-input::placeholder {
+  color: var(--text-muted);
+}
 
   .table-header, .table-row {
     display: grid;

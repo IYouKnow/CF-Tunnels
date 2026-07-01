@@ -597,7 +597,7 @@ func (s *Service) applyTunnelDNS(ctx context.Context, id int, zoneID, subdomain,
 func (s *Service) stopTunnelProcess(id string) {
 	if p, ok := s.Processes.Load(id); ok {
 		proc := p.(*os.Process)
-		proc.Kill()
+		proc.Signal(os.Interrupt)
 		s.Processes.Delete(id)
 	}
 
@@ -606,10 +606,19 @@ func (s *Service) stopTunnelProcess(id string) {
 	if pid > 0 {
 		proc, _ := os.FindProcess(pid)
 		if proc != nil {
-			proc.Kill()
+			proc.Signal(os.Interrupt)
 		}
 		s.DB.Exec("UPDATE tunnels SET status = 'stopped', pid = 0 WHERE id = ?", id)
 	}
+}
+
+func (s *Service) StopAll() {
+	s.Processes.Range(func(key, value any) bool {
+		proc := value.(*os.Process)
+		proc.Signal(os.Interrupt)
+		s.Processes.Delete(key)
+		return true
+	})
 }
 
 func (s *Service) logTunnel(tunnelID interface{}, level, msg string) {

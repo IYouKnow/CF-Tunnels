@@ -10,7 +10,10 @@
 
     <div class="apps-grid">
       <div class="card app-list-card">
-        <div class="card-header">Apps</div>
+        <div class="card-header">
+          <span>Apps</span>
+          <input v-model="appSearch" type="text" class="search-input" placeholder="Filter apps…" />
+        </div>
         <div v-if="loadingApps" class="app-list">
           <div v-for="i in 3" :key="i" class="app-item" style="cursor: default;">
             <Skeleton width="32px" height="32px" borderRadius="8px" />
@@ -20,7 +23,7 @@
         <div v-else-if="apps.length === 0" class="empty">No apps registered yet.</div>
         <div v-else class="app-list">
           <button
-            v-for="app in apps"
+            v-for="app in filteredApps"
             :key="app.id"
             type="button"
             :class="['app-item', { active: selectedApp && selectedApp.id === app.id }]"
@@ -224,7 +227,7 @@
 </template>
 
 <script>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import api from '../api'
 import { APP_SCOPE_OPTIONS, APP_SCOPE_PRESETS } from '../constants/appScopes'
 import { X, Copy, Check } from '@lucide/vue'
@@ -240,6 +243,16 @@ export default {
     const selectedApp = ref(null)
     const tokens = ref([])
     const loadingApps = ref(true)
+    const appSearch = ref('')
+
+    const filteredApps = computed(() => {
+      const q = appSearch.value.toLowerCase().trim()
+      if (!q) return apps.value
+      return apps.value.filter(a =>
+        a.name.toLowerCase().includes(q) ||
+        a.slug.toLowerCase().includes(q)
+      )
+    })
     const loadingTokens = ref(false)
     const showCreateApp = ref(false)
     const showCreateToken = ref(false)
@@ -419,7 +432,7 @@ export default {
     })
 
     return {
-      apps, selectedApp, tokens, loadingApps, loadingTokens,
+      apps, selectedApp, tokens, loadingApps, loadingTokens, appSearch, filteredApps,
       showCreateApp, showCreateToken, newApp, newToken,
       appError, tokenError,       tokenReveal, copied, copiedPrefix, scopeOptions,
       formatTime, applyScopePreset, selectApp, copyToken, copyPrefix,
@@ -454,6 +467,26 @@ export default {
 }
 
 .app-list { display: flex; flex-direction: column; }
+
+.search-input {
+  padding: 0.4rem 0.65rem;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  width: 180px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.search-input:focus {
+  border-color: var(--accent);
+}
+
+.search-input::placeholder {
+  color: var(--text-muted);
+}
 
 .app-item {
   display: flex;
