@@ -1,6 +1,6 @@
 import axios from 'axios'
 
-const inferredDevBase = window.location.port === '8080'
+const inferredDevBase = window.location.port && window.location.port !== '38427'
   ? `${window.location.protocol}//${window.location.hostname}:38427`
   : ''
 

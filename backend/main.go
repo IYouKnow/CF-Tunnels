@@ -227,7 +227,49 @@ func clearSessionCookie(c *gin.Context) {
 	})
 }
 
+type loginRateLimiter struct {
+	mu      sync.Mutex
+	attempts map[string][]time.Time
+}
+
+func (rl *loginRateLimiter) allow(ip string) (bool, time.Duration) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	window := 5 * time.Minute
+	maxAttempts := 5
+
+	entries := rl.attempts[ip]
+	var recent []time.Time
+	for _, t := range entries {
+		if now.Sub(t) < window {
+			recent = append(recent, t)
+		}
+	}
+
+	if len(recent) >= maxAttempts {
+		retryAfter := window - now.Sub(recent[0])
+		return false, retryAfter
+	}
+
+	recent = append(recent, now)
+	rl.attempts[ip] = recent
+	return true, 0
+}
+
+var loginLimiter = &loginRateLimiter{attempts: make(map[string][]time.Time)}
+
 func postLogin(c *gin.Context) {
+	ip := c.ClientIP()
+	allowed, retryAfter := loginLimiter.allow(ip)
+	if !allowed {
+		secs := int(retryAfter.Seconds()) + 1
+		c.Header("Retry-After", strconv.Itoa(secs))
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": fmt.Sprintf("Too many login attempts. Try again in %d seconds.", secs)})
+		return
+	}
+
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -441,8 +483,15 @@ func main() {
 	}
 	defer db.Close()
 
-	// Quiet stdout: tunnel/DNS helpers use log.Printf; UI still has /api/logs in SQLite.
-	log.SetOutput(io.Discard)
+	// Route standard library logs to a file in the data directory.
+	logFile := filepath.Join(cfg.DataDir, "app.log")
+	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err == nil {
+		log.SetOutput(f)
+		defer f.Close()
+	} else {
+		log.SetOutput(os.Stderr)
+	}
 	appSvc = apps.NewService(db)
 	dnsSvc = dnsservice.NewService(cfClient)
 	tunnelSvc = tunnels.NewService(db, cfClient, cfg.AccountID, cfg.APIToken != "", &tunnelProcs, logTunnel, newTunnelLogWriter)
@@ -545,10 +594,19 @@ func main() {
 }
 
 func corsMiddleware() gin.HandlerFunc {
+	allowedOrigins := map[string]bool{
+		"http://localhost:8080": true,
+		"http://127.0.0.1:8080": true,
+		"http://localhost:38427": true,
+		"http://127.0.0.1:38427": true,
+	}
+
 	return func(c *gin.Context) {
 		origin := c.GetHeader("Origin")
 		if origin != "" {
-			c.Header("Access-Control-Allow-Origin", origin)
+			if allowedOrigins[origin] {
+				c.Header("Access-Control-Allow-Origin", origin)
+			}
 			c.Header("Vary", "Origin")
 			c.Header("Access-Control-Allow-Credentials", "true")
 			c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
@@ -839,7 +897,22 @@ func startTunnel(c *gin.Context) {
 }
 
 func stopTunnel(c *gin.Context) {
-	_ = tunnelSvc.StopTunnel(c.Request.Context(), c.Param("id"))
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tunnel ID"})
+		return
+	}
+
+	err = tunnelSvc.StopTunnel(c.Request.Context(), strconv.Itoa(id))
+	if errors.Is(err, tunnels.ErrTunnelNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Tunnel not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{"message": "Tunnel stopped"})
 }
 

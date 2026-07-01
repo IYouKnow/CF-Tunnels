@@ -435,6 +435,16 @@ func (s *Service) StartTunnel(ctx context.Context, id int) (StartTunnelResult, e
 // callers can share the same process-stop and state-update behavior.
 func (s *Service) StopTunnel(ctx context.Context, id string) error {
 	_ = ctx
+
+	var exists bool
+	err := s.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM tunnels WHERE id = ?)", id).Scan(&exists)
+	if err != nil {
+		return fmt.Errorf("check tunnel: %w", err)
+	}
+	if !exists {
+		return ErrTunnelNotFound
+	}
+
 	s.stopTunnelProcess(id)
 	s.DB.Exec("UPDATE tunnels SET status = 'stopped', pid = 0 WHERE id = ?", id)
 	s.logTunnel(id, "info", "Tunnel stopped")
