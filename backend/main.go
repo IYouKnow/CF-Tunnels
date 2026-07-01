@@ -41,10 +41,6 @@ type Config struct {
 	AdminPass     string `mapstructure:"ADMIN_PASSWORD" env:"ADMIN_PASSWORD"`
 	ListenPort    int    `mapstructure:"LISTEN_PORT" env:"LISTEN_PORT"`
 	SessionSecret string `mapstructure:"SESSION_SECRET" env:"SESSION_SECRET"`
-	// DataDir holds tunnels.db (mount a host volume here in Docker, e.g. /app/data).
-	DataDir string `mapstructure:"DATA_DIR" env:"DATA_DIR"`
-	// WebRoot is the Vite build output directory (Docker: /app/share/web; dev: ./frontend/dist).
-	WebRoot string `mapstructure:"WEB_ROOT" env:"WEB_ROOT"`
 }
 
 type Tunnel struct {
@@ -434,6 +430,20 @@ func validateAccountIDForTunnelAPI(accountID string) string {
 	return ""
 }
 
+func dataDir() string {
+	if _, err := os.Stat("/app/data"); err == nil {
+		return "/app/data"
+	}
+	return "."
+}
+
+func webRootDir() string {
+	if _, err := os.Stat("/app/share/web"); err == nil {
+		return "/app/share/web"
+	}
+	return defaultWebRootDir()
+}
+
 // defaultWebRootDir picks the Vite out dir for local runs (repo root vs backend/ cwd).
 func defaultWebRootDir() string {
 	candidates := []string{
@@ -479,12 +489,6 @@ func main() {
 			cfg.ListenPort = p
 		}
 	}
-	if v := strings.TrimSpace(os.Getenv("DATA_DIR")); v != "" {
-		cfg.DataDir = v
-	}
-	if v := strings.TrimSpace(os.Getenv("WEB_ROOT")); v != "" {
-		cfg.WebRoot = v
-	}
 	normalizeCFConfig(&cfg)
 	cfClient = cloudflare.NewClient(cfg.APIToken, cfg.AccountID)
 
@@ -497,13 +501,7 @@ func main() {
 	if cfg.ListenPort == 0 {
 		cfg.ListenPort = 38427
 	}
-	if strings.TrimSpace(cfg.DataDir) == "" {
-		cfg.DataDir = "."
-	}
-	initSessionKey(cfg.DataDir)
-	if strings.TrimSpace(cfg.WebRoot) == "" {
-		cfg.WebRoot = defaultWebRootDir()
-	}
+	initSessionKey(dataDir())
 	cfClient = cloudflare.NewClient(cfg.APIToken, cfg.AccountID)
 
 	if err := initDB(); err != nil {
@@ -512,7 +510,7 @@ func main() {
 	defer db.Close()
 
 	// Route standard library logs to a file in the data directory.
-	logFile := filepath.Join(cfg.DataDir, "app.log")
+	logFile := filepath.Join(dataDir(), "app.log")
 	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err == nil {
 		log.SetOutput(f)
@@ -587,7 +585,7 @@ func main() {
 	v1.GET("/api/v1/dns/:hostname", appTokenAuthMiddleware(), requireAppScope("dns:read"), getAppDNSRecord)
 	v1.PATCH("/api/v1/dns/:hostname", appTokenAuthMiddleware(), requireAppScope("dns:update"), patchAppDNSRecord)
 
-	webRoot := filepath.Clean(cfg.WebRoot)
+	webRoot := filepath.Clean(webRootDir())
 	assetsFS := filepath.Join(webRoot, "assets")
 	indexHTML := filepath.Join(webRoot, "index.html")
 	r.Static("/assets", assetsFS)
@@ -679,7 +677,7 @@ func joinRouters(primary http.Handler, v1 http.Handler) http.Handler {
 }
 
 func initDB() error {
-	dir := filepath.Clean(cfg.DataDir)
+	dir := filepath.Clean(dataDir())
 	dbPath := filepath.Join(dir, "tunnels.db")
 
 	if err := os.MkdirAll(dir, 0755); err != nil {

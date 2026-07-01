@@ -36,8 +36,6 @@ services:
     environment:
       TZ: UTC
       LISTEN_PORT: "38427"
-      DATA_DIR: /app/data
-      WEB_ROOT: /app/share/web
       CF_API_TOKEN: ${CF_API_TOKEN}
       CF_ACCOUNT_ID: ${CF_ACCOUNT_ID}
       ADMIN_USER: ${ADMIN_USER:-admin}
