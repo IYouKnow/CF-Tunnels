@@ -17,6 +17,7 @@
           </svg>
           Refresh
         </button>
+        <span v-if="live" class="live-badge">● Live</span>
       </div>
     </div>
 
@@ -52,7 +53,7 @@
 </template>
 
 <script>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, watch } from 'vue'
 import api from '../api'
 import { useKeyboardShortcuts } from '../composables/useKeyboardShortcuts'
 
@@ -64,7 +65,8 @@ export default {
     const selectedTunnel = ref('')
     const loading = ref(true)
     const loadError = ref('')
-    let refreshInterval = null
+    const live = ref(false)
+    let eventSource = null
 
     const normalizeLogList = (result) => {
       if (result == null) return []
@@ -107,6 +109,42 @@ export default {
       }
     }
 
+    const knownIds = new Set()
+
+    const connectStream = () => {
+      disconnectStream()
+      const url = api.getLogStreamURL(selectedTunnel.value || null)
+      eventSource = new EventSource(url, { withCredentials: true })
+
+      eventSource.onopen = () => {
+        live.value = true
+      }
+
+      eventSource.onmessage = (e) => {
+        try {
+          const entry = JSON.parse(e.data)
+          if (entry && entry.id != null && !knownIds.has(entry.id)) {
+            knownIds.add(entry.id)
+            logs.value = [entry, ...logs.value]
+          }
+        } catch (err) {
+          console.error('SSE parse error:', err)
+        }
+      }
+
+      eventSource.onerror = () => {
+        live.value = false
+      }
+    }
+
+    const disconnectStream = () => {
+      if (eventSource) {
+        eventSource.close()
+        eventSource = null
+        live.value = false
+      }
+    }
+
     const formatTime = (timestamp) => {
       if (!timestamp) return '-'
       const date = new Date(timestamp)
@@ -114,23 +152,27 @@ export default {
       return date.toLocaleString()
     }
 
+    watch(selectedTunnel, async () => {
+      knownIds.clear()
+      await loadLogs()
+      connectStream()
+    })
+
     onMounted(async () => {
       await loadTunnels()
       await loadLogs()
-      refreshInterval = setInterval(loadLogs, 5000)
+      connectStream()
     })
 
     onUnmounted(() => {
-      if (refreshInterval) {
-        clearInterval(refreshInterval)
-      }
+      disconnectStream()
     })
 
     useKeyboardShortcuts({
       'Ctrl+R': () => { loadLogs() }
     })
 
-    return { logs, tunnels, selectedTunnel, loadLogs, getTunnelName, formatTime, loading, loadError }
+    return { logs, tunnels, selectedTunnel, loadLogs, getTunnelName, formatTime, loading, loadError, live }
   }
 }
 </script>
@@ -252,6 +294,18 @@ export default {
   font-family: monospace;
   font-size: 0.85rem;
   word-break: break-all;
+}
+
+.live-badge {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--success, #22c55e);
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
 }
 
 .empty {

@@ -77,13 +77,53 @@ type LogEntry struct {
 	Message   string    `json:"message"`
 }
 
+type LogEvent struct {
+	ID        int64       `json:"id"`
+	TunnelID  interface{} `json:"tunnel_id"`
+	Timestamp string      `json:"timestamp"`
+	Level     string      `json:"level"`
+	Message   string      `json:"message"`
+}
+
+type LogBroadcaster struct {
+	mu   sync.RWMutex
+	subs map[chan LogEvent]struct{}
+}
+
+func (lb *LogBroadcaster) Subscribe() chan LogEvent {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	ch := make(chan LogEvent, 128)
+	lb.subs[ch] = struct{}{}
+	return ch
+}
+
+func (lb *LogBroadcaster) Unsubscribe(ch chan LogEvent) {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	delete(lb.subs, ch)
+	close(ch)
+}
+
+func (lb *LogBroadcaster) Publish(event LogEvent) {
+	lb.mu.RLock()
+	defer lb.mu.RUnlock()
+	for ch := range lb.subs {
+		select {
+		case ch <- event:
+		default:
+		}
+	}
+}
+
 var (
-	db          *sql.DB
-	cfg         Config
-	appSvc      *apps.Service
-	cfClient    *cloudflare.Client
-	dnsSvc      *dnsservice.Service
-	tunnelSvc   *tunnels.Service
+	db             *sql.DB
+	cfg            Config
+	appSvc         *apps.Service
+	cfClient       *cloudflare.Client
+	dnsSvc         *dnsservice.Service
+	tunnelSvc      *tunnels.Service
+	logBroadcaster = &LogBroadcaster{subs: make(map[chan LogEvent]struct{})}
 	tunnelProcs = sync.Map{}
 )
 
@@ -428,6 +468,7 @@ func main() {
 	r.POST("/api/tunnels/:id/stop", stopTunnel)
 	r.GET("/api/tunnels/:id/logs", getTunnelLogs)
 	r.GET("/api/logs", getAllLogs)
+	r.GET("/api/logs/stream", streamLogs)
 
 	r.GET("/api/ingress", listIngressRules)
 	r.POST("/api/ingress", createIngressRule)
@@ -812,6 +853,37 @@ func getAllLogs(c *gin.Context) {
 	c.JSON(http.StatusOK, logs)
 }
 
+func streamLogs(c *gin.Context) {
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+
+	ch := logBroadcaster.Subscribe()
+	defer logBroadcaster.Unsubscribe(ch)
+
+	tunnelID := c.Query("tunnel_id")
+
+	c.Stream(func(w io.Writer) bool {
+		select {
+		case event, ok := <-ch:
+			if !ok {
+				return false
+			}
+			if tunnelID != "" && fmt.Sprintf("%v", event.TunnelID) != tunnelID {
+				return true
+			}
+			data, err := json.Marshal(event)
+			if err != nil {
+				return true
+			}
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			return true
+		case <-c.Request.Context().Done():
+			return false
+		}
+	})
+}
+
 func listIngressRules(c *gin.Context) {
 	tunnelID := c.Query("tunnel_id")
 	if tunnelID != "" {
@@ -905,10 +977,19 @@ func getStatus(c *gin.Context) {
 }
 
 func logTunnel(tunnelID interface{}, level, msg string) {
-	_, err := db.Exec("INSERT INTO logs (tunnel_id, level, message, timestamp) VALUES (?, ?, ?, datetime('now'))", tunnelID, level, msg)
+	result, err := db.Exec("INSERT INTO logs (tunnel_id, level, message, timestamp) VALUES (?, ?, ?, datetime('now'))", tunnelID, level, msg)
 	if err != nil {
 		log.Printf("[LOG ERROR] Failed to insert log: %v", err)
+		return
 	}
+	id, _ := result.LastInsertId()
+	logBroadcaster.Publish(LogEvent{
+		ID:        id,
+		TunnelID:  tunnelID,
+		Timestamp: time.Now().Format("2006-01-02 15:04:05"),
+		Level:     level,
+		Message:   msg,
+	})
 }
 
 type logWriter struct {

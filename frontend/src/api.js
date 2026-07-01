@@ -52,6 +52,11 @@ export default {
     client.get(`/api/tunnels/${id}/logs?limit=${limit}`).then(r => expectLogArray(r.data, 'Tunnel logs')),
   getAllLogs: (limit = 500) =>
     client.get(`/api/logs?limit=${limit}`).then(r => expectLogArray(r.data, 'All logs')),
+  getLogStreamURL: (tunnelId) => {
+    const base = import.meta.env.VITE_API_BASE_URL || inferredDevBase
+    const url = `${base}/api/logs/stream`
+    return tunnelId ? `${url}?tunnel_id=${tunnelId}` : url
+  },
   getIngressRules: (tunnelId) => client.get(`/api/ingress?tunnel_id=${tunnelId}`).then(r => r.data),
   createIngressRule: (data) => client.post('/api/ingress', data).then(r => r.data),
   updateIngressRule: (id, data) => client.put(`/api/ingress/${id}`, data).then(r => r.data),
