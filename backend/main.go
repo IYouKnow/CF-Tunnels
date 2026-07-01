@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
@@ -137,13 +138,33 @@ type sessionPayload struct {
 	Exp  int64  `json:"exp"`
 }
 
-func (c *Config) sessionKey() []byte {
-	s := strings.TrimSpace(c.SessionSecret)
+var sessionKey []byte
+
+func initSessionKey(dataDir string) {
+	s := strings.TrimSpace(os.Getenv("SESSION_SECRET"))
 	if s != "" {
-		return []byte(s)
+		sessionKey = []byte(s)
+		log.Println("[AUTH] Using SESSION_SECRET from environment")
+		return
 	}
-	sum := sha256.Sum256([]byte(c.AdminPass + "9cf-ui-session-v1"))
-	return sum[:]
+
+	keyPath := filepath.Join(dataDir, "session.key")
+	existing, err := os.ReadFile(keyPath)
+	if err == nil && len(existing) >= 32 {
+		sessionKey = existing[:32]
+		log.Println("[AUTH] Loaded session key from", keyPath)
+		return
+	}
+
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		log.Fatalf("[AUTH] Failed to generate session key: %v", err)
+	}
+	if err := os.MkdirAll(dataDir, 0700); err == nil {
+		os.WriteFile(keyPath, key, 0600)
+	}
+	sessionKey = key
+	log.Println("[AUTH] Generated new session key at", keyPath)
 }
 
 func signSession(username string) (string, error) {
@@ -155,7 +176,7 @@ func signSession(username string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	mac := hmac.New(sha256.New, cfg.sessionKey())
+	mac := hmac.New(sha256.New, sessionKey)
 	mac.Write(raw)
 	sig := mac.Sum(nil)
 	payloadB64 := base64.RawURLEncoding.EncodeToString(raw)
@@ -176,7 +197,7 @@ func verifySessionToken(token string) (string, bool) {
 	if err != nil || len(sig) != 32 {
 		return "", false
 	}
-	mac := hmac.New(sha256.New, cfg.sessionKey())
+	mac := hmac.New(sha256.New, sessionKey)
 	mac.Write(raw)
 	if !hmac.Equal(sig, mac.Sum(nil)) {
 		return "", false
@@ -289,6 +310,12 @@ func postLogin(c *gin.Context) {
 	}
 	setSessionCookie(c, token)
 	c.JSON(http.StatusOK, gin.H{"username": req.Username})
+}
+
+func getAuthConfigStatus(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"credentialsConfigured": cfg.AdminUser != "" && cfg.AdminPass != "",
+	})
 }
 
 func postLogout(c *gin.Context) {
@@ -462,10 +489,10 @@ func main() {
 	cfClient = cloudflare.NewClient(cfg.APIToken, cfg.AccountID)
 
 	if cfg.AdminUser == "" {
-		cfg.AdminUser = "admin"
+		log.Println("[AUTH] WARNING: ADMIN_USER is not set. Login will be unavailable until ADMIN_USER is set in .env or environment.")
 	}
 	if cfg.AdminPass == "" {
-		cfg.AdminPass = "changeme"
+		log.Println("[AUTH] WARNING: ADMIN_PASSWORD is not set. Login will be unavailable until ADMIN_PASSWORD is set in .env or environment.")
 	}
 	if cfg.ListenPort == 0 {
 		cfg.ListenPort = 38427
@@ -473,6 +500,7 @@ func main() {
 	if strings.TrimSpace(cfg.DataDir) == "" {
 		cfg.DataDir = "."
 	}
+	initSessionKey(cfg.DataDir)
 	if strings.TrimSpace(cfg.WebRoot) == "" {
 		cfg.WebRoot = defaultWebRootDir()
 	}
@@ -504,6 +532,7 @@ func main() {
 
 	r.Use(authMiddleware())
 
+	r.GET("/api/auth/config-status", getAuthConfigStatus)
 	r.POST("/api/login", postLogin)
 	r.POST("/api/logout", postLogout)
 	r.GET("/api/auth/me", getAuthMe)

@@ -1,6 +1,7 @@
 <template>
   <div class="login-page">
     <div class="login-card card">
+      <div v-if="configWarning" class="config-banner">{{ configWarning }}</div>
       <div class="login-header">
         <h1>CF Tunnels</h1>
         <p class="subtitle">Sign in to manage tunnels and DNS</p>
@@ -36,7 +37,7 @@
 </template>
 
 <script>
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api from '../api'
 import { refreshAuth } from '../auth'
@@ -50,6 +51,16 @@ export default {
     const password = ref('')
     const error = ref('')
     const submitting = ref(false)
+    const configWarning = ref('')
+
+    onMounted(async () => {
+      try {
+        const status = await api.getConfigStatus()
+        if (!status.credentialsConfigured) {
+          configWarning.value = 'Admin credentials not configured. Set ADMIN_USER and ADMIN_PASSWORD in .env and restart the server.'
+        }
+      } catch (_) {}
+    })
 
     const submit = async () => {
       error.value = ''
@@ -68,7 +79,7 @@ export default {
       }
     }
 
-    return { username, password, error, submitting, submit }
+    return { username, password, error, submitting, submit, configWarning }
   }
 }
 </script>
@@ -119,5 +130,17 @@ export default {
 .login-btn:disabled {
   opacity: 0.7;
   cursor: not-allowed;
+}
+
+.config-banner {
+  background: var(--error-subtle);
+  border: 1px solid var(--error);
+  color: var(--error);
+  font-size: 0.85rem;
+  padding: 0.75rem 1rem;
+  border-radius: var(--radius-md);
+  margin-bottom: 1rem;
+  text-align: center;
+  line-height: 1.4;
 }
 </style>

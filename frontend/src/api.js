@@ -34,6 +34,7 @@ client.interceptors.response.use(
 )
 
 export default {
+  getConfigStatus: () => client.get('/api/auth/config-status', { skipAuthRedirect: true }).then(r => r.data),
   login: (username, password) =>
     client.post('/api/login', { username, password }, { skipAuthRedirect: true }).then(r => r.data),
   logout: () => client.post('/api/logout').then(r => r.data),
