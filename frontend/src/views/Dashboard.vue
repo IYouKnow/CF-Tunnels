@@ -8,19 +8,18 @@
     </div>
 
     <div class="stats-grid">
-      <div class="stat-card">
+      <div v-if="loading" class="stat-card">
         <div class="stat-icon total">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
           </svg>
         </div>
         <div class="stat-content">
-          <div class="stat-value">{{ status.total }}</div>
-          <div class="stat-label">Total Tunnels</div>
+          <Skeleton height="2.2rem" width="4rem" />
+          <div class="stat-label" style="margin-top: 0.25rem;"><Skeleton height="0.875rem" width="6rem" /></div>
         </div>
       </div>
-      
-      <div class="stat-card">
+      <div v-if="loading" class="stat-card">
         <div class="stat-icon running">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
@@ -28,12 +27,11 @@
           </svg>
         </div>
         <div class="stat-content">
-          <div class="stat-value" style="color: var(--success)">{{ status.running }}</div>
-          <div class="stat-label">Running</div>
+          <Skeleton height="2.2rem" width="4rem" />
+          <div class="stat-label" style="margin-top: 0.25rem;"><Skeleton height="0.875rem" width="5rem" /></div>
         </div>
       </div>
-      
-      <div class="stat-card">
+      <div v-if="loading" class="stat-card">
         <div class="stat-icon stopped">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="10"/>
@@ -41,15 +39,63 @@
           </svg>
         </div>
         <div class="stat-content">
-          <div class="stat-value">{{ status.stopped }}</div>
-          <div class="stat-label">Stopped</div>
+          <Skeleton height="2.2rem" width="4rem" />
+          <div class="stat-label" style="margin-top: 0.25rem;"><Skeleton height="0.875rem" width="5rem" /></div>
         </div>
       </div>
+      <template v-if="!loading">
+        <div class="stat-card">
+          <div class="stat-icon total">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+            </svg>
+          </div>
+          <div class="stat-content">
+            <div class="stat-value">{{ status.total }}</div>
+            <div class="stat-label">Total Tunnels</div>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon running">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+              <polyline points="22 4 12 14.01 9 11.01"/>
+            </svg>
+          </div>
+          <div class="stat-content">
+            <div class="stat-value" style="color: var(--success)">{{ status.running }}</div>
+            <div class="stat-label">Running</div>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon stopped">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"/>
+              <line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>
+            </svg>
+          </div>
+          <div class="stat-content">
+            <div class="stat-value">{{ status.stopped }}</div>
+            <div class="stat-label">Stopped</div>
+          </div>
+        </div>
+      </template>
     </div>
 
     <div class="card">
       <div class="card-header">Recent Tunnels</div>
-      <div class="tunnel-list" v-if="tunnels.length > 0">
+      <div v-if="loading" class="tunnel-list">
+        <div v-for="i in 3" :key="i" class="tunnel-item">
+          <div class="tunnel-info">
+            <Skeleton height="1rem" width="8rem" />
+            <div style="margin-top: 0.4rem;"><Skeleton height="0.75rem" width="12rem" /></div>
+          </div>
+          <div class="tunnel-meta">
+            <Skeleton height="1.2rem" width="6rem" borderRadius="999px" />
+          </div>
+        </div>
+      </div>
+      <div class="tunnel-list" v-else-if="tunnels.length > 0">
         <div v-for="tunnel in tunnels" :key="tunnel.id" class="tunnel-item">
           <div class="tunnel-info">
             <div class="tunnel-name">{{ tunnel.name }}</div>
@@ -107,13 +153,16 @@
 import { ref, onMounted } from 'vue'
 import api from '../api'
 import { useKeyboardShortcuts } from '../composables/useKeyboardShortcuts'
+import Skeleton from '../components/Skeleton.vue'
 
 export default {
   name: 'Dashboard',
+  components: { Skeleton },
   setup() {
     const status = ref({ total: 0, running: 0, stopped: 0 })
     const tunnels = ref([])
     const domains = ref([])
+    const loading = ref(true)
 
     const getDomainName = (zoneId) => {
       const domain = domains.value.find(d => d.id === zoneId)
@@ -121,16 +170,19 @@ export default {
     }
 
     const loadData = async () => {
+      loading.value = true
       try {
         status.value = await api.getStatus()
-        const tunnelData = await api.getTunnels()
-        tunnels.value = (tunnelData || []).slice(0, 5)
+        const tunnelData = await api.getTunnels(1, 5)
+        tunnels.value = (tunnelData.tunnels || []).slice(0, 5)
         const domainData = await api.getDomains()
         domains.value = domainData?.domains || []
       } catch (e) {
         console.error(e)
         tunnels.value = []
         domains.value = []
+      } finally {
+        loading.value = false
       }
     }
 
@@ -140,7 +192,7 @@ export default {
       'Ctrl+R': () => { loadData() }
     })
 
-    return { status, tunnels, domains, getDomainName }
+    return { status, tunnels, domains, getDomainName, loading }
   }
 }
 </script>

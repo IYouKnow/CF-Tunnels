@@ -40,7 +40,11 @@ export default {
   getMe: () => client.get('/api/auth/me', { skipAuthRedirect: true }).then(r => r.data),
 
   getStatus: () => client.get('/api/status').then(r => r.data),
-  getTunnels: () => client.get('/api/tunnels').then(r => r.data),
+  getTunnels: (page = 1, perPage = 50, q = '') => {
+    const params = { page, per_page: perPage }
+    if (q) params.q = q
+    return client.get('/api/tunnels', { params }).then(r => r.data)
+  },
   getTunnel: (id) => client.get(`/api/tunnels/${id}`).then(r => r.data),
   syncTunnels: () => client.post('/api/tunnels/sync').then(r => r.data),
   createTunnel: (data) => client.post('/api/tunnels', data).then(r => r.data),

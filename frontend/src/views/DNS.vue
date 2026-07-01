@@ -103,8 +103,8 @@
       <div class="card-header">
         <span>DNS Records</span>
         <div class="controls">
-          <select v-model="selectedZone" @change="loadRecords" class="zone-select">
-            <option value="">Select a domain</option>
+          <select v-model="selectedZone" @change="loadRecords" class="zone-select" :disabled="loadingDomains">
+            <option value="">{{ loadingDomains ? 'Loading domains…' : 'Select a domain' }}</option>
             <option v-for="d in domains" :key="d.id" :value="d.id">{{ d.name }}</option>
           </select>
           <div v-if="totalRecords" class="record-count">{{ totalRecords }} records</div>
@@ -163,6 +163,7 @@ export default {
     const records = ref([])
     const selectedZone = ref('')
     const loading = ref(false)
+    const loadingDomains = ref(true)
     const totalRecords = ref(0)
     const showTutorial = ref(false)
     const showForm = ref(false)
@@ -173,6 +174,7 @@ export default {
     const deletingRecord = ref(null)
 
     const loadDomains = async () => {
+      loadingDomains.value = true
       try {
         const result = await api.getDomains(1, 100)
         domains.value = result.domains || []
@@ -182,6 +184,8 @@ export default {
         }
       } catch (e) {
         showToast('Failed to load domains: ' + (e.response?.data?.error || e.message), 'error')
+      } finally {
+        loadingDomains.value = false
       }
     }
 
@@ -224,22 +228,20 @@ export default {
       if (!selectedZone.value) return
       saving.value = true
       try {
+        const payload = {
+          type: form.value.type,
+          name: form.value.name,
+          content: form.value.content,
+        }
+        if (form.value.type !== 'TXT') {
+          payload.proxied = form.value.proxied
+        }
         if (editingRecord.value) {
-          await api.updateDNSRecord(selectedZone.value, editingRecord.value.id, {
-            type: form.value.type,
-            name: form.value.name,
-            content: form.value.content,
-            proxied: form.value.type !== 'TXT' ? form.value.proxied : undefined
-          })
+          await api.updateDNSRecord(selectedZone.value, editingRecord.value.id, payload)
           showToast('DNS record updated')
         } else {
-          await api.createDNSRecord({
-            zone_id: selectedZone.value,
-            type: form.value.type,
-            name: form.value.name,
-            content: form.value.content,
-            proxied: form.value.type !== 'TXT' ? form.value.proxied : false
-          })
+          payload.zone_id = selectedZone.value
+          await api.createDNSRecord(payload)
           showToast('DNS record created')
         }
         closeForm()
@@ -292,7 +294,7 @@ export default {
     })
 
     return {
-      domains, records, selectedZone, loading, totalRecords, showTutorial,
+      domains, records, selectedZone, loading, loadingDomains, totalRecords, showTutorial,
       showForm, editingRecord, saving, form,
       showDeleteConfirm, deletingRecord,
       loadRecords, openCreateModal, openEditModal, closeForm, saveRecord,

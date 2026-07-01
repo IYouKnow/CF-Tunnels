@@ -21,6 +21,14 @@
         <div class="col-status">Status</div>
         <div class="col-actions">Actions</div>
       </div>
+      <div v-if="loading" v-for="i in 5" :key="i" class="table-row">
+        <div class="col-name"><Skeleton height="0.9rem" width="70%" /></div>
+        <div class="col-domain"><Skeleton height="0.9rem" width="60%" /></div>
+        <div class="col-address"><Skeleton height="0.9rem" width="50%" /></div>
+        <div class="col-uuid"><Skeleton height="0.9rem" width="80%" /></div>
+        <div class="col-status"><Skeleton height="1.2rem" width="4rem" borderRadius="999px" /></div>
+        <div class="col-actions"><Skeleton height="1.2rem" width="1.5rem" /></div>
+      </div>
       <div v-for="tunnel in filteredTunnels" :key="tunnel.id" :id="'tunnel-' + tunnel.name" :class="['table-row', { highlighted: highlightedTunnel === tunnel.name }]">
         <div class="col-name">
           <div class="tunnel-name">{{ tunnel.name }}</div>
@@ -53,7 +61,7 @@
           </div>
         </div>
       </div>
-      <div v-if="tunnels.length === 0" class="empty">No tunnels. Create one to get started.</div>
+      <div v-if="!loading && tunnels.length === 0" class="empty">No tunnels. Create one to get started.</div>
       <div v-else class="table-footer">
         <div class="pagination">
           <button class="btn-small" @click="prevPage" :disabled="currentPage <= 1">Prev</button>
@@ -125,18 +133,19 @@
 </template>
 
 <script>
-import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
 import { useKeyboardShortcuts } from '../composables/useKeyboardShortcuts'
 import { useRoute } from 'vue-router'
 import api from '../api'
 import { showToast } from '../toast'
 import ConfirmModal from '../components/ConfirmModal.vue'
+import Skeleton from '../components/Skeleton.vue'
 
 let syncedOnce = false
 
 export default {
   name: 'Tunnels',
-  components: { ConfirmModal },
+  components: { ConfirmModal, Skeleton },
   setup() {
     const tunnels = ref([])
     const domains = ref([])
@@ -151,6 +160,7 @@ export default {
     const currentPage = ref(1)
     const perPage = ref(20)
     const totalTunnels = ref(0)
+    const loading = ref(true)
     const syncing = ref(false)
     const openDropdown = ref(null)
     const searchQuery = ref('')
@@ -159,15 +169,7 @@ export default {
 
     const totalPages = computed(() => Math.ceil(totalTunnels.value / perPage.value))
 
-    const filteredTunnels = computed(() => {
-      if (!searchQuery.value) return tunnels.value
-      const query = searchQuery.value.toLowerCase()
-      return tunnels.value.filter(t => 
-        t.name.toLowerCase().includes(query) ||
-        (t.subdomain && t.subdomain.toLowerCase().includes(query)) ||
-        (t.uuid && t.uuid.toLowerCase().includes(query))
-      )
-    })
+    const filteredTunnels = computed(() => tunnels.value)
 
     const selectedDomainName = computed(() => {
       const domain = domains.value.find(d => d.id === newTunnel.value.zone_id)
@@ -180,11 +182,27 @@ export default {
     }
 
     const loadTunnels = async () => {
-      const allTunnels = await api.getTunnels()
-      totalTunnels.value = (allTunnels || []).length
-      const start = (currentPage.value - 1) * perPage.value
-      tunnels.value = (allTunnels || []).slice(start, start + perPage.value)
+      loading.value = true
+      try {
+        const result = await api.getTunnels(currentPage.value, perPage.value, searchQuery.value)
+        tunnels.value = result.tunnels || []
+        totalTunnels.value = result.total || 0
+      } catch (e) {
+        console.error(e)
+        tunnels.value = []
+      } finally {
+        loading.value = false
+      }
     }
+
+    let searchTimer
+    watch(searchQuery, () => {
+      clearTimeout(searchTimer)
+      searchTimer = setTimeout(() => {
+        currentPage.value = 1
+        loadTunnels()
+      }, 250)
+    })
 
     const loadDomains = async () => {
       try {
@@ -380,6 +398,7 @@ export default {
       searchQuery,
       searchInput,
       highlightedTunnel,
+      loading,
       syncing,
       syncTunnels,
       openDropdown,

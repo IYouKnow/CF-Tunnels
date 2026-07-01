@@ -103,7 +103,8 @@ export default {
 
     const loadTunnels = async () => {
       try {
-        tunnels.value = await api.getTunnels()
+        const result = await api.getTunnels(1, 500)
+        tunnels.value = result.tunnels || []
       } catch (e) {
         console.error(e)
       }

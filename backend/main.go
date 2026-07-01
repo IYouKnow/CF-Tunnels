@@ -667,20 +667,49 @@ func initDB() error {
 }
 
 func listTunnels(c *gin.Context) {
-	rows, err := db.Query("SELECT id, name, uuid, account_id, zone_id, subdomain, domain, COALESCE(address, ''), created_at, status, pid FROM tunnels")
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "50"))
+	if page < 1 {
+		page = 1
+	}
+	if perPage < 1 || perPage > 200 {
+		perPage = 50
+	}
+	q := strings.TrimSpace(c.Query("q"))
+
+	where := ""
+	args := []interface{}{}
+	if q != "" {
+		like := "%" + q + "%"
+		where = "WHERE name LIKE ? OR subdomain LIKE ? OR uuid LIKE ?"
+		args = append(args, like, like, like)
+	}
+
+	var total int
+	countQuery := "SELECT COUNT(*) FROM tunnels " + where
+	db.QueryRow(countQuery, args...).Scan(&total)
+
+	offset := (page - 1) * perPage
+	args = append(args, perPage, offset)
+	rows, err := db.Query("SELECT id, name, uuid, account_id, zone_id, subdomain, domain, COALESCE(address, ''), created_at, status, pid FROM tunnels "+where+" ORDER BY name LIMIT ? OFFSET ?", args...)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	defer rows.Close()
 
-	var tunnels []Tunnel
+	tunnels := make([]Tunnel, 0)
 	for rows.Next() {
 		var t Tunnel
 		rows.Scan(&t.ID, &t.Name, &t.UUID, &t.AccountID, &t.ZoneID, &t.Subdomain, &t.Domain, &t.Address, &t.CreatedAt, &t.Status, &t.PID)
 		tunnels = append(tunnels, t)
 	}
-	c.JSON(http.StatusOK, tunnels)
+	c.JSON(http.StatusOK, gin.H{
+		"tunnels":  tunnels,
+		"total":    total,
+		"page":     page,
+		"per_page": perPage,
+	})
 }
 
 func createTunnel(c *gin.Context) {

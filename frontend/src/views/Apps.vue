@@ -11,7 +11,12 @@
     <div class="apps-grid">
       <div class="card app-list-card">
         <div class="card-header">Apps</div>
-        <div v-if="loadingApps" class="empty">Loading apps...</div>
+        <div v-if="loadingApps" class="app-list">
+          <div v-for="i in 3" :key="i" class="app-item" style="cursor: default;">
+            <Skeleton width="32px" height="32px" borderRadius="8px" />
+            <div class="app-meta" style="flex:1"><Skeleton height="0.875rem" width="60%" /><div style="margin-top: 0.25rem;"><Skeleton height="0.75rem" width="40%" /></div></div>
+          </div>
+        </div>
         <div v-else-if="apps.length === 0" class="empty">No apps registered yet.</div>
         <div v-else class="app-list">
           <button
@@ -62,7 +67,18 @@
               <button class="btn-primary" @click="showCreateToken = true">+ New Token</button>
             </div>
 
-            <div v-if="loadingTokens" class="empty">Loading tokens...</div>
+            <div v-if="loadingTokens" class="token-list">
+              <div v-for="i in 2" :key="i" class="token-item">
+                <div class="token-primary">
+                  <div class="token-info"><Skeleton height="0.875rem" width="6rem" /></div>
+                  <Skeleton height="1.4rem" width="4rem" borderRadius="4px" />
+                </div>
+                <div class="token-secondary">
+                  <Skeleton height="0.75rem" width="8rem" />
+                  <Skeleton height="0.75rem" width="10rem" />
+                </div>
+              </div>
+            </div>
             <div v-else-if="tokens.length === 0" class="empty">No tokens created yet.</div>
             <div v-else class="token-list">
               <div v-for="token in tokens" :key="token.id" class="token-item">
@@ -213,16 +229,17 @@ import api from '../api'
 import { APP_SCOPE_OPTIONS, APP_SCOPE_PRESETS } from '../constants/appScopes'
 import { X, Copy, Check } from '@lucide/vue'
 import ConfirmModal from '../components/ConfirmModal.vue'
+import Skeleton from '../components/Skeleton.vue'
 import { useKeyboardShortcuts } from '../composables/useKeyboardShortcuts'
 
 export default {
   name: 'Apps',
-  components: { X, Copy, Check, ConfirmModal },
+  components: { X, Copy, Check, ConfirmModal, Skeleton },
   setup () {
     const apps = ref([])
     const selectedApp = ref(null)
     const tokens = ref([])
-    const loadingApps = ref(false)
+    const loadingApps = ref(true)
     const loadingTokens = ref(false)
     const showCreateApp = ref(false)
     const showCreateToken = ref(false)

@@ -7,8 +7,8 @@
       </div>
       <p class="confirm-text">{{ message }}</p>
       <div class="modal-actions">
-        <button class="btn-secondary" @click="$emit('cancel')">Cancel</button>
-        <button :class="danger ? 'btn-danger' : 'btn-primary'" @click="$emit('confirm')" :disabled="disabled">
+        <button ref="cancelBtn" class="btn-secondary" @click="$emit('cancel')">Cancel</button>
+        <button ref="confirmBtn" :class="danger ? 'btn-danger' : 'btn-primary'" @click="$emit('confirm')" :disabled="disabled">
           {{ loading ? loadingText || confirmText : confirmText }}
         </button>
       </div>
@@ -17,7 +17,7 @@
 </template>
 
 <script>
-import { onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 
 export default {
   name: 'ConfirmModal',
@@ -33,14 +33,23 @@ export default {
   },
   emits: ['confirm', 'cancel'],
   setup (props, { emit }) {
+    const cancelBtn = ref(null)
+    const confirmBtn = ref(null)
+
     function onKeyDown(e) {
       if (e.key === 'Enter' && props.show && !props.disabled) {
-        emit('confirm')
+        if (document.activeElement === cancelBtn.value) {
+          emit('cancel')
+        } else {
+          emit('confirm')
+        }
       }
     }
 
     onMounted(() => window.addEventListener('keydown', onKeyDown))
     onUnmounted(() => window.removeEventListener('keydown', onKeyDown))
+
+    return { cancelBtn, confirmBtn }
   }
 }
 </script>
