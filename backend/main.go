@@ -32,7 +32,7 @@ import (
 	"github.com/spf13/viper"
 )
 
-var AppVersion = "1.0.4"
+var AppVersion = "1.0.6"
 
 type Config struct {
 	APIToken      string `mapstructure:"CF_API_TOKEN" env:"CF_API_TOKEN"`
