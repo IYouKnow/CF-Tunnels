@@ -29,6 +29,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.app
+      args:
+        APP_VERSION: ${APP_VERSION:-dev}
     container_name: cf-tunnels
     network_mode: bridge
     ports:
