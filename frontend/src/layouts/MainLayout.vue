@@ -97,7 +97,7 @@
             <div class="vb-top">
               <span class="vl">CF-Tunnels</span>
             </div>
-            <span class="vv">v{{ appVer || '...' }}</span>
+            <span class="vv">{{ appVer || '...' }}</span>
             <div v-if="appUpdate" class="update-available">
               <span class="update-msg">Update available</span>
               <div class="update-actions">
@@ -148,6 +148,14 @@
       {{ t.message }}
     </div>
   </div>
+  <ConfirmModal
+    :show="dockerUpdateModal"
+    title="Update via Docker"
+    message="This app is running in Docker. Pull the latest image using your Docker management interface, or run: docker compose pull &amp;&amp; docker compose up -d"
+    confirm-text="Got it"
+    @confirm="dockerUpdateModal = false"
+    @cancel="dockerUpdateModal = false"
+  />
 </template>
 
 <script>
@@ -157,6 +165,7 @@ import api from '../api'
 import { currentUser } from '../auth'
 import { useToast, showToast } from '../toast'
 import { useKeyboardShortcuts } from '../composables/useKeyboardShortcuts'
+import ConfirmModal from '../components/ConfirmModal.vue'
 
 const routeTitles = {
   '/': 'Dashboard',
@@ -204,6 +213,10 @@ export default {
     })
 
     const doAppUpdate = async () => {
+      if (dockerMode.value) {
+        dockerUpdateModal.value = true
+        return
+      }
       updatingApp.value = true
       try {
         const result = await api.updateApp()
@@ -237,6 +250,8 @@ export default {
     const appUpdate = ref(null)
     const updating = ref(false)
     const updatingApp = ref(false)
+    const dockerMode = ref(false)
+    const dockerUpdateModal = ref(false)
     const { toasts } = useToast()
 
     onMounted(async () => {
@@ -249,7 +264,10 @@ export default {
       ])
       if (cfVer.status === 'fulfilled') cloudflaredVer.value = cfVer.value.version
       if (cfUpdate.status === 'fulfilled' && cfUpdate.value.hasUpdate) cloudflaredUpdate.value = cfUpdate.value
-      if (aVer.status === 'fulfilled') appVer.value = aVer.value.version
+      if (aVer.status === 'fulfilled') {
+        appVer.value = aVer.value.version
+        dockerMode.value = aVer.value.docker
+      }
       if (aUpdate.status === 'fulfilled' && aUpdate.value.hasUpdate) appUpdate.value = aUpdate.value
     })
 
@@ -257,7 +275,7 @@ export default {
       'Escape': () => { accountOpen.value = false }
     })
 
-    return { theme, pageTitle, toggleTheme, displayName, userInitial, logout, toasts, sidebarOpen, accountOpen, appVer, cloudflaredVer, cloudflaredUpdate, appUpdate, updating, doUpdate, updatingApp, doAppUpdate }
+    return { theme, pageTitle, toggleTheme, displayName, userInitial, logout, toasts, sidebarOpen, accountOpen, appVer, cloudflaredVer, cloudflaredUpdate, appUpdate, updating, doUpdate, updatingApp, doAppUpdate, dockerUpdateModal }
   }
 }
 </script>

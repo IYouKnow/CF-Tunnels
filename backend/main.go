@@ -1361,7 +1361,8 @@ func updateCloudflared(c *gin.Context) {
 }
 
 func getAppVersion(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"version": AppVersion})
+	_, isDocker := os.Stat("/app/data")
+	c.JSON(http.StatusOK, gin.H{"version": AppVersion, "docker": isDocker == nil})
 }
 
 func getAppUpdate(c *gin.Context) {
