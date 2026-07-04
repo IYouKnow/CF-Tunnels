@@ -800,8 +800,12 @@ func (s *Service) UpdateCloudflared(ctx context.Context) (string, error) {
 	path := resolveCloudflaredPath()
 	cmd := exec.CommandContext(ctx, path, "update")
 	out, err := cmd.CombinedOutput()
+	msg := strings.TrimSpace(string(out))
 	if err != nil {
-		return string(out), fmt.Errorf("update failed: %w", err)
+		if strings.Contains(msg, "has been updated") || strings.Contains(msg, "up to date") {
+			return msg, nil
+		}
+		return msg, fmt.Errorf("update failed: %w", err)
 	}
-	return strings.TrimSpace(string(out)), nil
+	return msg, nil
 }
