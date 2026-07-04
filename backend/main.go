@@ -1385,7 +1385,7 @@ func getAppUpdate(c *gin.Context) {
 	}
 	current := strings.TrimPrefix(AppVersion, "v")
 	latest := strings.TrimPrefix(release.TagName, "v")
-	hasUpdate := current != "dev" && latest != current
+	hasUpdate := current != "dev" && semverGreater(latest, current)
 	c.JSON(http.StatusOK, gin.H{
 		"currentVersion": AppVersion,
 		"latestVersion":  latest,
@@ -1841,4 +1841,20 @@ func deleteDNSRecord(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "DNS record deleted"})
+}
+
+func semverGreater(a, b string) bool {
+	as := strings.Split(a, ".")
+	bs := strings.Split(b, ".")
+	for i := 0; i < len(as) && i < len(bs); i++ {
+		ai, _ := strconv.Atoi(as[i])
+		bi, _ := strconv.Atoi(bs[i])
+		if ai > bi {
+			return true
+		}
+		if ai < bi {
+			return false
+		}
+	}
+	return len(as) > len(bs)
 }
