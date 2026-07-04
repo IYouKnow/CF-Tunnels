@@ -83,5 +83,6 @@ export default {
   checkCloudflaredUpdate: () => client.get('/api/cloudflared/check-update').then(r => r.data),
   updateCloudflared: () => client.post('/api/cloudflared/update').then(r => r.data),
   getAppVersion: () => client.get('/api/app/version').then(r => r.data),
-  checkAppUpdate: () => client.get('/api/app/check-update').then(r => r.data)
+  checkAppUpdate: () => client.get('/api/app/check-update').then(r => r.data),
+  updateApp: () => client.post('/api/app/update').then(r => r.data)
 }

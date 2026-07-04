@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,7 +33,7 @@ import (
 	"github.com/spf13/viper"
 )
 
-var AppVersion = "1.0.6"
+var AppVersion = "dev"
 
 type Config struct {
 	APIToken      string `mapstructure:"CF_API_TOKEN" env:"CF_API_TOKEN"`
@@ -564,6 +565,7 @@ func main() {
 
 	r.GET("/api/app/version", getAppVersion)
 	r.GET("/api/app/check-update", getAppUpdate)
+	r.POST("/api/app/update", updateApp)
 
 	r.GET("/api/apps", listApps)
 	r.POST("/api/apps", createApp)
@@ -1380,14 +1382,114 @@ func getAppUpdate(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	current := strings.TrimPrefix(AppVersion, "v")
 	latest := strings.TrimPrefix(release.TagName, "v")
-	hasUpdate := latest != AppVersion
+	hasUpdate := current != "dev" && latest != current
 	c.JSON(http.StatusOK, gin.H{
 		"currentVersion": AppVersion,
 		"latestVersion":  latest,
 		"hasUpdate":      hasUpdate,
 		"releaseUrl":     release.HTMLURL,
 	})
+}
+
+func updateApp(c *gin.Context) {
+	if AppVersion == "dev" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot update a dev build. Use git pull and rebuild."})
+		return
+	}
+
+	req, _ := http.NewRequestWithContext(c.Request.Context(), "GET", "https://api.github.com/repos/IYouKnow/CF-Tunnels/releases/latest", nil)
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check latest release: " + err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+
+	var release struct {
+		TagName string `json:"tag_name"`
+		HTMLURL string `json:"html_url"`
+		Assets  []struct {
+			Name               string `json:"name"`
+			BrowserDownloadURL string `json:"browser_download_url"`
+		} `json:"assets"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse release data: " + err.Error()})
+		return
+	}
+
+	current := strings.TrimPrefix(AppVersion, "v")
+	latest := strings.TrimPrefix(release.TagName, "v")
+	if latest == current {
+		c.JSON(http.StatusOK, gin.H{"message": "Already up to date"})
+		return
+	}
+
+	assetSuffix := runtime.GOOS + "-" + runtime.GOARCH
+	if runtime.GOOS == "windows" {
+		assetSuffix += ".exe"
+	}
+	var downloadURL string
+	for _, a := range release.Assets {
+		if strings.Contains(a.Name, assetSuffix) {
+			downloadURL = a.BrowserDownloadURL
+			break
+		}
+	}
+	if downloadURL == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "No binary found for " + assetSuffix,
+			"message": "Download the latest release manually: " + release.HTMLURL,
+		})
+		return
+	}
+
+	dlResp, err := http.Get(downloadURL)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Download failed: " + err.Error()})
+		return
+	}
+	defer dlResp.Body.Close()
+
+	exe, err := os.Executable()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Cannot determine executable path: " + err.Error()})
+		return
+	}
+
+	tmp := exe + ".new"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Cannot write update: " + err.Error()})
+		return
+	}
+	if _, err := io.Copy(f, dlResp.Body); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Download write failed: " + err.Error()})
+		return
+	}
+	f.Close()
+
+	if err := os.Rename(tmp, exe); err != nil {
+		os.Remove(tmp)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Cannot replace binary: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Update downloaded. Restarting..."})
+
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		proc, _ := os.FindProcess(os.Getpid())
+		if proc != nil {
+			proc.Signal(syscall.SIGTERM)
+		}
+	}()
 }
 
 func getAppMe(c *gin.Context) {

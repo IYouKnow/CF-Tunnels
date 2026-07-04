@@ -96,19 +96,27 @@
           <div class="vb">
             <div class="vb-top">
               <span class="vl">CF-Tunnels</span>
-              <a v-if="appUpdate" :href="appUpdate.releaseUrl" target="_blank" class="ub">↑ v{{ appUpdate.latestVersion }}</a>
             </div>
             <span class="vv">v{{ appVer || '...' }}</span>
+            <div v-if="appUpdate" class="update-available">
+              <span class="update-msg">Update available</span>
+              <div class="update-actions">
+                <button class="ub up" :disabled="updatingApp" @click="doAppUpdate">{{ updatingApp ? '...' : 'Update' }}</button>
+              </div>
+            </div>
           </div>
+          <div class="version-divider"></div>
           <div class="vb">
             <div class="vb-top">
               <span class="vl">cloudflared</span>
-              <template v-if="cloudflaredUpdate">
-                <button class="ub up" :disabled="updating" @click="doUpdate">{{ updating ? '...' : '↑' }}</button>
-                <a :href="cloudflaredUpdate.releaseUrl" target="_blank" class="ub">v{{ cloudflaredUpdate.latestVersion }}</a>
-              </template>
             </div>
             <span class="vv">{{ cloudflaredVer || '...' }}</span>
+            <div v-if="cloudflaredUpdate" class="update-available">
+              <span class="update-msg">Update available</span>
+              <div class="update-actions">
+                <button class="ub up" :disabled="updating" @click="doUpdate">{{ updating ? '...' : 'Update' }}</button>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -195,6 +203,19 @@ export default {
       sidebarOpen.value = false
     })
 
+    const doAppUpdate = async () => {
+      updatingApp.value = true
+      try {
+        const result = await api.updateApp()
+        showToast(result.message || 'Update completed, restarting...')
+        appUpdate.value = null
+      } catch (e) {
+        showToast(e.response?.data?.error || e.message, 'error')
+      } finally {
+        updatingApp.value = false
+      }
+    }
+
     const doUpdate = async () => {
       updating.value = true
       try {
@@ -215,6 +236,7 @@ export default {
     const appVer = ref('')
     const appUpdate = ref(null)
     const updating = ref(false)
+    const updatingApp = ref(false)
     const { toasts } = useToast()
 
     onMounted(async () => {
@@ -235,7 +257,7 @@ export default {
       'Escape': () => { accountOpen.value = false }
     })
 
-    return { theme, pageTitle, toggleTheme, displayName, userInitial, logout, toasts, sidebarOpen, accountOpen, appVer, cloudflaredVer, cloudflaredUpdate, appUpdate, updating, doUpdate }
+    return { theme, pageTitle, toggleTheme, displayName, userInitial, logout, toasts, sidebarOpen, accountOpen, appVer, cloudflaredVer, cloudflaredUpdate, appUpdate, updating, doUpdate, updatingApp, doAppUpdate }
   }
 }
 </script>
@@ -354,40 +376,40 @@ export default {
 }
 
 .toast {
-  padding: 0.625rem 1rem;
-  border-radius: 10px;
-  font-size: 0.8125rem;
+  padding: 0.4rem 0.75rem;
+  border-radius: 6px;
+  font-size: 0.75rem;
   font-weight: 450;
   line-height: 1.4;
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  box-shadow: 0 2px 8px rgba(0,0,0,0.08), 0 0 0 1px inset;
   animation: toast-in 0.25s cubic-bezier(0.16, 1, 0.3, 1);
   pointer-events: auto;
-  max-width: 360px;
+  max-width: 320px;
 }
 
 .toast-success {
   color: var(--success);
   background: rgba(34, 197, 94, 0.08);
-  box-shadow: 0 2px 8px rgba(0,0,0,0.08), inset 0 0 0 1px rgba(34, 197, 94, 0.2);
 }
 
 .toast-error {
   color: var(--error);
   background: rgba(239, 68, 68, 0.08);
-  box-shadow: 0 2px 8px rgba(0,0,0,0.08), inset 0 0 0 1px rgba(239, 68, 68, 0.2);
 }
 
 .toast-info {
   color: var(--text-secondary);
   background: rgba(160, 160, 160, 0.06);
-  box-shadow: 0 2px 8px rgba(0,0,0,0.08), inset 0 0 0 1px var(--border);
 }
 
 @keyframes toast-in {
   from { transform: translateX(100%); opacity: 0; }
   to { transform: translateX(0); opacity: 1; }
+}
+
+.version-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 0.25rem 0;
 }
 
 .sidebar-version {
@@ -488,6 +510,27 @@ export default {
 
 .update-btn:hover:not(:disabled) { opacity: 0.85; }
 .update-btn:disabled { opacity: 0.5; cursor: default; }
+
+.update-available {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-top: 0.15rem;
+}
+
+.update-msg {
+  color: var(--accent);
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.update-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
 
 .hamburger {
   display: none;

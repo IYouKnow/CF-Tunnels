@@ -16,7 +16,9 @@ WORKDIR /build/frontend
 RUN npm install && npm run build
 
 WORKDIR /build/backend
-RUN go build -o /out/cf-tunnels main.go
+ARG APP_VERSION
+RUN test -n "$APP_VERSION" || APP_VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "dev"); \
+    go build -ldflags="-X main.AppVersion=${APP_VERSION}" -o /out/cf-tunnels main.go
 
 FROM alpine:3.21
 

@@ -44,6 +44,9 @@ tunnels.db
 *.sqlite
 *.sqlite3
 
+# --- Session key (auto-generated secret) ---
+session.key
+
 # --- Logs & temp ---
 *.log
 logs/
