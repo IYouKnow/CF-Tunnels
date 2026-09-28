@@ -633,6 +633,23 @@ func (s *Service) applyTunnelDNS(ctx context.Context, id int, zoneID, subdomain,
 		Proxied: &proxied,
 	})
 	if err != nil {
+		// The record may already exist in Cloudflare while our DB has no
+		// (or a stale) dns_record_id — e.g. local dev DB against the real
+		// CF account. Adopt the existing record instead of erroring every boot.
+		if strings.Contains(strings.ToLower(err.Error()), "already exists") {
+			if existing, findErr := s.CF.FindDNSRecord(ctx, zoneID, fullDomain, "CNAME"); findErr == nil && existing != nil {
+				s.DB.Exec("UPDATE tunnels SET dns_record_id = ? WHERE id = ?", existing.ID, id)
+				if strings.EqualFold(strings.TrimSuffix(existing.Content, "."), expectedContent) {
+					s.logTunnel(id, "info", "Adopted existing DNS CNAME record: "+fullDomain)
+					log.Printf("[DNS] Adopted existing record %s for %s", existing.ID, fullDomain)
+				} else {
+					s.logTunnel(id, "error", fmt.Sprintf("DNS CNAME %s points to %q, expected %q — fix manually in Cloudflare",
+						fullDomain, existing.Content, expectedContent))
+					log.Printf("[DNS] WARNING: %s points to %q, expected %q", fullDomain, existing.Content, expectedContent)
+				}
+				return
+			}
+		}
 		log.Printf("[DNS] ERROR: %v", err)
 		s.logTunnel(id, "error", "DNS CNAME failed: "+err.Error())
 		return
