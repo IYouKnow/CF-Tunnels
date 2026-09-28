@@ -48,6 +48,7 @@
         </div>
         <div class="col-status">
           <span :class="['badge', tunnel.status]">{{ tunnel.status }}</span>
+          <span v-if="!tunnel.auto_start" class="manual-badge" title="Will not auto-start on container boot">manual</span>
         </div>
         <div class="col-actions">
           <div class="dropdown" @click.stop>
@@ -96,6 +97,10 @@
             <input v-model="newTunnel.address" type="text" placeholder="http://localhost:38427" />
             <small>The target service to tunnel to (e.g., http://localhost:38427, tcp://localhost:22)</small>
           </div>
+          <div class="form-group checkbox-group">
+            <label><input v-model="newTunnel.auto_start" type="checkbox" /> Auto-start on container boot</label>
+            <small>Uncheck to leave stopped after a restart (manual start only)</small>
+          </div>
           <div class="modal-actions">
             <button type="button" class="btn-secondary" @click="showCreateModal = false">Cancel</button>
             <button type="submit" class="btn-primary">Create Tunnel</button>
@@ -111,6 +116,9 @@
           <div class="form-group">
             <label>Tunnel Name</label>
             <input v-model="editName" type="text" placeholder="my-tunnel" required />
+          </div>
+          <div class="form-group checkbox-group">
+            <label><input v-model="editAutoStart" type="checkbox" /> Auto-start on container boot</label>
           </div>
           <div class="modal-actions">
             <button type="button" class="btn-secondary" @click="showEditModal = false">Cancel</button>
@@ -170,7 +178,8 @@ export default {
     const showEditModal = ref(false)
     const editTarget = ref(null)
     const editName = ref('')
-    const newTunnel = ref({ name: '', account_id: '', zone_id: '', subdomain: '', address: '' })
+    const editAutoStart = ref(true)
+    const newTunnel = ref({ name: '', account_id: '', zone_id: '', subdomain: '', address: '', auto_start: true })
     const showDeleteConfirm = ref(false)
     const deletingTunnelId = ref(null)
     const deletingTunnelName = ref('')
@@ -261,6 +270,7 @@ export default {
     const openEditModal = (tunnel) => {
       editTarget.value = tunnel
       editName.value = tunnel.name
+      editAutoStart.value = tunnel.auto_start !== false
       showEditModal.value = true
     }
 
@@ -268,12 +278,13 @@ export default {
       const name = editName.value.trim()
       if (!name || !editTarget.value) return
       const id = editTarget.value.id
+      const auto_start = editAutoStart.value
       showEditModal.value = false
       editTarget.value = null
       try {
-        await api.updateTunnel(id, { name })
+        await api.updateTunnel(id, { name, auto_start })
         loadTunnels()
-        showToast('Tunnel renamed')
+        showToast('Tunnel updated')
       } catch (e) {
         showToast(e.response?.data?.error || e.message, 'error')
         loadTunnels()
@@ -302,10 +313,11 @@ export default {
           zone_id: newTunnel.value.zone_id,
           domain: selectedDomainName.value,
           subdomain: newTunnel.value.subdomain,
-          address: newTunnel.value.address
+          address: newTunnel.value.address,
+          auto_start: newTunnel.value.auto_start !== false
         })
         showCreateModal.value = false
-        newTunnel.value = { name: '', account_id: '', zone_id: '', subdomain: '', address: '' }
+        newTunnel.value = { name: '', account_id: '', zone_id: '', subdomain: '', address: '', auto_start: true }
         loadTunnels()
       } catch (e) {
         showToast(e.response?.data?.error || e.message, 'error')
@@ -415,6 +427,7 @@ export default {
       showCreateModal,
       showEditModal,
       editName,
+      editAutoStart,
       newTunnel, 
       createTunnel, 
       showStartConfirm,
@@ -556,6 +569,22 @@ export default {
 
 .no-domain {
   color: var(--text-secondary);
+}
+
+.manual-badge {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  margin-left: 0.4rem;
+}
+
+.checkbox-group label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 500;
 }
 
 .col-address code {

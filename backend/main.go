@@ -56,6 +56,7 @@ type Tunnel struct {
 	CreatedAt time.Time `json:"created_at"`
 	Status    string    `json:"status"`
 	PID       int       `json:"pid,omitempty"`
+	AutoStart bool      `json:"auto_start"`
 }
 
 type IngressRule struct {
@@ -510,11 +511,12 @@ func main() {
 	}
 	defer db.Close()
 
-	// Route standard library logs to a file in the data directory.
+	// Route standard library logs to both the data-dir file and docker logs.
+	// Previously file-only, which hid boot activity from `docker logs`.
 	logFile := filepath.Join(dataDir(), "app.log")
 	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err == nil {
-		log.SetOutput(f)
+		log.SetOutput(io.MultiWriter(os.Stderr, f))
 		defer f.Close()
 	} else {
 		log.SetOutput(os.Stderr)
@@ -522,6 +524,20 @@ func main() {
 	appSvc = apps.NewService(db)
 	dnsSvc = dnsservice.NewService(cfClient)
 	tunnelSvc = tunnels.NewService(db, cfClient, cfg.AccountID, cfg.APIToken != "", &tunnelProcs, logTunnel, newTunnelLogWriter)
+
+	// Boot reconcile (RCA 2026-09-27): respawn cloudflared children for
+	// tunnels whose desired state is running+auto_start. Runs async so slow
+	// Cloudflare calls never block ListenAndServe.
+	go func() {
+		time.Sleep(2 * time.Second)
+		log.Printf("[BOOT] reconcile starting (desired state: status=running AND auto_start=1)")
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		res := tunnelSvc.ReconcileOnBoot(ctx)
+		recordBootReconcile(res.Started, res.Total, len(res.Failed), res.Skipped, res.Pruned, res.Failed)
+		log.Printf("[BOOT] reconcile finished: started %d/%d (skipped=%d failed=%d prunedOrphans=%d)",
+			res.Started, res.Total, res.Skipped, len(res.Failed), res.Pruned)
+	}()
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
@@ -702,6 +718,11 @@ func initDB() error {
 		return err
 	}
 
+	// Enforce foreign keys per connection so ingress_rules/logs cascade on
+	// tunnel delete instead of accumulating orphans (RCA A6).
+	_, _ = db.Exec("PRAGMA foreign_keys = ON")
+	_, _ = db.Exec("PRAGMA journal_mode = WAL")
+
 	db.Exec("PRAGMA user_version = 1")
 
 	// Create table first; then ALTER adds columns missing on older DBs (ALTER before CREATE fails when table does not exist).
@@ -719,7 +740,8 @@ func initDB() error {
 			tunnel_token TEXT,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			status TEXT DEFAULT 'stopped',
-			pid INTEGER DEFAULT 0
+			pid INTEGER DEFAULT 0,
+			auto_start INTEGER DEFAULT 1
 		);
 		CREATE TABLE IF NOT EXISTS ingress_rules (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -769,6 +791,10 @@ func initDB() error {
 	if _, e := db.Exec("ALTER TABLE tunnels ADD COLUMN IF NOT EXISTS tunnel_token TEXT"); e != nil {
 		_, _ = db.Exec("ALTER TABLE tunnels ADD COLUMN tunnel_token TEXT")
 	}
+	if _, e := db.Exec("ALTER TABLE tunnels ADD COLUMN IF NOT EXISTS auto_start INTEGER DEFAULT 1"); e != nil {
+		_, _ = db.Exec("ALTER TABLE tunnels ADD COLUMN auto_start INTEGER DEFAULT 1")
+	}
+	_, _ = db.Exec("UPDATE tunnels SET auto_start = 1 WHERE auto_start IS NULL")
 	return nil
 }
 
@@ -797,7 +823,7 @@ func listTunnels(c *gin.Context) {
 
 	offset := (page - 1) * perPage
 	args = append(args, perPage, offset)
-	rows, err := db.Query("SELECT id, name, uuid, account_id, zone_id, subdomain, domain, COALESCE(address, ''), created_at, status, pid FROM tunnels "+where+" ORDER BY name LIMIT ? OFFSET ?", args...)
+	rows, err := db.Query("SELECT id, name, uuid, account_id, zone_id, subdomain, domain, COALESCE(address, ''), created_at, status, pid, COALESCE(auto_start, 1) FROM tunnels "+where+" ORDER BY name LIMIT ? OFFSET ?", args...)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -807,7 +833,9 @@ func listTunnels(c *gin.Context) {
 	tunnels := make([]Tunnel, 0)
 	for rows.Next() {
 		var t Tunnel
-		rows.Scan(&t.ID, &t.Name, &t.UUID, &t.AccountID, &t.ZoneID, &t.Subdomain, &t.Domain, &t.Address, &t.CreatedAt, &t.Status, &t.PID)
+		var autoStart int64
+		rows.Scan(&t.ID, &t.Name, &t.UUID, &t.AccountID, &t.ZoneID, &t.Subdomain, &t.Domain, &t.Address, &t.CreatedAt, &t.Status, &t.PID, &autoStart)
+		t.AutoStart = autoStart != 0
 		tunnels = append(tunnels, t)
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -827,6 +855,7 @@ func createTunnel(c *gin.Context) {
 		Domain    string `json:"domain"`
 		Subdomain string `json:"subdomain"`
 		Address   string `json:"address"`
+		AutoStart *bool  `json:"auto_start"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -839,6 +868,7 @@ func createTunnel(c *gin.Context) {
 		Domain:    req.Domain,
 		Subdomain: req.Subdomain,
 		Address:   req.Address,
+		AutoStart: req.AutoStart,
 	})
 	if err != nil {
 		var badReq *tunnels.BadRequestError
@@ -860,13 +890,18 @@ func updateTunnel(c *gin.Context) {
 		return
 	}
 	var req struct {
-		Name string `json:"name" binding:"required"`
+		Name      string `json:"name"`
+		AutoStart *bool  `json:"auto_start"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if err := tunnelSvc.UpdateTunnelName(c.Request.Context(), id, req.Name); err != nil {
+	if strings.TrimSpace(req.Name) == "" && req.AutoStart == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Nothing to update: provide name and/or auto_start"})
+		return
+	}
+	if err := tunnelSvc.UpdateTunnelSettings(c.Request.Context(), id, strings.TrimSpace(req.Name), req.AutoStart); err != nil {
 		if errors.Is(err, tunnels.ErrTunnelNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Tunnel not found"})
 			return
@@ -874,7 +909,7 @@ func updateTunnel(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "Tunnel renamed"})
+	c.JSON(http.StatusOK, gin.H{"message": "Tunnel updated"})
 }
 
 func syncTunnels(c *gin.Context) {
@@ -887,14 +922,16 @@ func syncTunnels(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"imported": imported, "updated": updated})
+	pruned, _ := tunnelSvc.PruneOrphanIngressRules()
+	c.JSON(http.StatusOK, gin.H{"imported": imported, "updated": updated, "prunedOrphans": pruned})
 }
 
 func getTunnel(c *gin.Context) {
 	id := c.Param("id")
 	var t Tunnel
-	err := db.QueryRow("SELECT id, name, uuid, account_id, zone_id, subdomain, domain, address, created_at, status, pid FROM tunnels WHERE id = ?", id).
-		Scan(&t.ID, &t.Name, &t.UUID, &t.AccountID, &t.ZoneID, &t.Subdomain, &t.Domain, &t.Address, &t.CreatedAt, &t.Status, &t.PID)
+	var autoStart int64
+	err := db.QueryRow("SELECT id, name, uuid, account_id, zone_id, subdomain, domain, address, created_at, status, pid, COALESCE(auto_start, 1) FROM tunnels WHERE id = ?", id).
+		Scan(&t.ID, &t.Name, &t.UUID, &t.AccountID, &t.ZoneID, &t.Subdomain, &t.Domain, &t.Address, &t.CreatedAt, &t.Status, &t.PID, &autoStart)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Tunnel not found"})
 		return
@@ -903,6 +940,7 @@ func getTunnel(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	t.AutoStart = autoStart != 0
 	c.JSON(http.StatusOK, t)
 }
 
@@ -1139,11 +1177,50 @@ func getStatus(c *gin.Context) {
 	var total, running, stopped int
 	db.QueryRow("SELECT COUNT(*), SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END), SUM(CASE WHEN status = 'stopped' THEN 1 ELSE 0 END) FROM tunnels").Scan(&total, &running, &stopped)
 
+	// Liveness-aware counts so monitoring can detect desired-vs-actual drift
+	// (e.g. after a restart where DB says running but no child exists).
+	desired, alive, _ := tunnelSvc.LiveCounts()
+
 	c.JSON(http.StatusOK, gin.H{
-		"total":   total,
-		"running": running,
-		"stopped": stopped,
+		"total":          total,
+		"running":        running,
+		"stopped":        stopped,
+		"desiredRunning": desired,
+		"aliveRunning":   alive,
+		"drift":          desired - alive,
+		"healthy":        desired == alive,
+		"boot":           lastBootReconcile(),
 	})
+}
+
+var bootMu sync.RWMutex
+
+// bootInfo is served via /api/status.boot for alerting on silent restarts.
+var bootInfo = map[string]interface{}{"reconciled": false}
+
+func recordBootReconcile(started, total, failed, skipped int, pruned int64, failures []string) {
+	bootMu.Lock()
+	defer bootMu.Unlock()
+	bootInfo = map[string]interface{}{
+		"reconciled":    true,
+		"at":            time.Now().UTC().Format(time.RFC3339),
+		"started":       started,
+		"total":         total,
+		"failed":        failed,
+		"skipped":       skipped,
+		"prunedOrphans": pruned,
+		"failures":      failures,
+	}
+}
+
+func lastBootReconcile() map[string]interface{} {
+	bootMu.RLock()
+	defer bootMu.RUnlock()
+	out := make(map[string]interface{}, len(bootInfo))
+	for k, v := range bootInfo {
+		out[k] = v
+	}
+	return out
 }
 
 func logTunnel(tunnelID interface{}, level, msg string) {

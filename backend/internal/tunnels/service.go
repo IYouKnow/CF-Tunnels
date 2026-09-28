@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/cf-tunnel-manager/backend/internal/cloudflare"
@@ -41,6 +42,9 @@ type CreateTunnelInput struct {
 	Domain    string
 	Subdomain string
 	Address   string
+	// AutoStart controls whether the tunnel is respawned on container boot.
+	// Nil means "default true" to preserve existing behavior.
+	AutoStart *bool
 }
 
 type CreateTunnelResult struct {
@@ -80,6 +84,7 @@ type tunnelRow struct {
 	PID         int
 	DNSRecordID string
 	TunnelToken string
+	AutoStart   bool
 }
 
 type ingressRule struct {
@@ -138,8 +143,8 @@ func (s *Service) CreateTunnel(ctx context.Context, input CreateTunnelInput) (Cr
 		tunnelToken = created.Token
 	}
 
-	result, err := s.DB.Exec("INSERT INTO tunnels (name, account_id, zone_id, subdomain, domain, address, uuid, tunnel_token, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'stopped')",
-		input.Name, accountID, input.ZoneID, input.Subdomain, input.Domain, input.Address, tunnelUUID, tunnelToken)
+	result, err := s.DB.Exec("INSERT INTO tunnels (name, account_id, zone_id, subdomain, domain, address, uuid, tunnel_token, status, auto_start) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'stopped', ?)",
+		input.Name, accountID, input.ZoneID, input.Subdomain, input.Domain, input.Address, tunnelUUID, tunnelToken, boolToInt(autoStartOrDefault(input.AutoStart)))
 	if err != nil {
 		return CreateTunnelResult{}, err
 	}
@@ -182,6 +187,21 @@ func (s *Service) UpdateTunnelName(ctx context.Context, id int, newName string) 
 
 	_, err = s.DB.Exec("UPDATE tunnels SET name = ? WHERE id = ?", newName, id)
 	return err
+}
+
+// UpdateTunnelSettings renames and/or toggles auto_start in one call.
+func (s *Service) UpdateTunnelSettings(ctx context.Context, id int, newName string, autoStart *bool) error {
+	if strings.TrimSpace(newName) != "" {
+		if err := s.UpdateTunnelName(ctx, id, strings.TrimSpace(newName)); err != nil {
+			return err
+		}
+	}
+	if autoStart != nil {
+		if err := s.SetAutoStart(id, *autoStart); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) SyncTunnels(ctx context.Context) (imported int, updated int, err error) {
@@ -241,7 +261,7 @@ func (s *Service) SyncTunnels(ctx context.Context) (imported int, updated int, e
 			}
 
 			_, insertErr := s.DB.Exec(
-				"INSERT INTO tunnels (name, uuid, account_id, zone_id, subdomain, domain, address, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+				"INSERT INTO tunnels (name, uuid, account_id, zone_id, subdomain, domain, address, status, auto_start, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
 				t.Name, t.ID, t.AccountID, zoneID, subdomain, domain, address, cfStatus, t.CreatedAt,
 			)
 			if insertErr != nil {
@@ -307,9 +327,11 @@ func (s *Service) StartTunnel(ctx context.Context, id int) (StartTunnelResult, e
 	if err != nil {
 		return StartTunnelResult{}, err
 	}
-	if t.Status == "running" && t.PID > 0 {
+	if t.Status == "running" && s.isTunnelAlive(t) {
 		return StartTunnelResult{}, &BadRequestError{Message: "Tunnel already running"}
 	}
+	// Stale row (status=running but no live process, e.g. after `docker restart`):
+	// fall through and respawn instead of returning "already running".
 
 	if t.Address != "" {
 		var conflictID int
@@ -510,6 +532,9 @@ func (s *Service) DeleteTunnel(ctx context.Context, id string) (DeleteTunnelResu
 	if _, err := s.DB.Exec("DELETE FROM tunnels WHERE id = ?", id); err != nil {
 		return DeleteTunnelResult{}, err
 	}
+	// Belt-and-suspenders: FK cascade needs PRAGMA foreign_keys=ON per
+	// connection, so explicitly remove rules to avoid orphans (RCA A6).
+	_, _ = s.DB.Exec("DELETE FROM ingress_rules WHERE tunnel_id NOT IN (SELECT id FROM tunnels)")
 	msg := "Tunnel deleted"
 	if len(warnings) > 0 {
 		msg += " (with warnings)"
@@ -519,11 +544,24 @@ func (s *Service) DeleteTunnel(ctx context.Context, id string) (DeleteTunnelResu
 
 func (s *Service) loadTunnelForStart(id int) (tunnelRow, error) {
 	var t tunnelRow
-	err := s.DB.QueryRow("SELECT id, name, uuid, account_id, zone_id, subdomain, domain, address, status, pid, COALESCE(dns_record_id, ''), COALESCE(tunnel_token, '') FROM tunnels WHERE id = ?", id).
-		Scan(&t.ID, &t.Name, &t.UUID, &t.AccountID, &t.ZoneID, &t.Subdomain, &t.Domain, &t.Address, &t.Status, &t.PID, &t.DNSRecordID, &t.TunnelToken)
+	var autoStart sql.NullInt64
+	err := s.DB.QueryRow("SELECT id, name, uuid, account_id, zone_id, subdomain, domain, address, status, pid, COALESCE(dns_record_id, ''), COALESCE(tunnel_token, ''), auto_start FROM tunnels WHERE id = ?", id).
+		Scan(&t.ID, &t.Name, &t.UUID, &t.AccountID, &t.ZoneID, &t.Subdomain, &t.Domain, &t.Address, &t.Status, &t.PID, &t.DNSRecordID, &t.TunnelToken, &autoStart)
 	if err == sql.ErrNoRows {
 		return tunnelRow{}, ErrTunnelNotFound
 	}
+	if err != nil {
+		// Older DBs without the auto_start column: retry without it, default true.
+		var t2 tunnelRow
+		err2 := s.DB.QueryRow("SELECT id, name, uuid, account_id, zone_id, subdomain, domain, address, status, pid, COALESCE(dns_record_id, ''), COALESCE(tunnel_token, '') FROM tunnels WHERE id = ?", id).
+			Scan(&t2.ID, &t2.Name, &t2.UUID, &t2.AccountID, &t2.ZoneID, &t2.Subdomain, &t2.Domain, &t2.Address, &t2.Status, &t2.PID, &t2.DNSRecordID, &t2.TunnelToken)
+		if err2 != nil {
+			return tunnelRow{}, err2
+		}
+		t2.AutoStart = true
+		return t2, nil
+	}
+	t.AutoStart = !autoStart.Valid || autoStart.Int64 != 0
 	return t, err
 }
 
@@ -562,15 +600,30 @@ func (s *Service) resolveZoneApex(ctx context.Context, zoneID string, domainStor
 }
 
 func (s *Service) applyTunnelDNS(ctx context.Context, id int, zoneID, subdomain, apex, tunnelUUID, existingDNSID string) {
-	if existingDNSID != "" {
-		s.logTunnel(id, "info", "DNS record already present, skipping creation")
-		return
-	}
 	if zoneID == "" || subdomain == "" || apex == "" || !s.HasAPIToken || tunnelUUID == "" {
 		s.logTunnel(id, "info", "Skipping DNS - need zone_id, subdomain, apex, tunnel UUID, and API token")
 		return
 	}
 	fullDomain := subdomain + "." + apex
+	expectedContent := tunnelUUID + ".cfargotunnel.com"
+	if strings.TrimSpace(existingDNSID) != "" {
+		// Validate the stored record instead of blindly trusting it (RCA:
+		// manual delete/recreate left dns_record_id mismatched).
+		records, err := s.CF.FindDNSRecords(ctx, zoneID, fullDomain, "CNAME")
+		if err != nil {
+			s.logTunnel(id, "error", "DNS validation lookup failed, keeping stored record: "+err.Error())
+			log.Printf("[DNS] validation lookup failed for %s: %v", fullDomain, err)
+			return
+		}
+		for _, r := range records {
+			if r.ID == strings.TrimSpace(existingDNSID) && strings.EqualFold(strings.TrimSuffix(r.Content, "."), expectedContent) {
+				s.logTunnel(id, "info", "DNS record already present, skipping creation")
+				return
+			}
+		}
+		s.logTunnel(id, "info", "Stored DNS record missing/mismatched vs Cloudflare, recreating CNAME")
+		log.Printf("[DNS] stored record %s missing/mismatched for %s, recreating", existingDNSID, fullDomain)
+	}
 	log.Printf("[DNS] Creating CNAME: %s -> %s.cfargotunnel.com", fullDomain, tunnelUUID)
 	proxied := true
 	record, err := s.CF.CreateDNSRecord(ctx, zoneID, cloudflare.DNSRecordInput{
@@ -603,22 +656,234 @@ func (s *Service) stopTunnelProcess(id string) {
 
 	var pid int
 	s.DB.QueryRow("SELECT pid FROM tunnels WHERE id = ?", id).Scan(&pid)
-	if pid > 0 {
-		proc, _ := os.FindProcess(pid)
-		if proc != nil {
+	if pid > 0 && isPIDAlive(pid) {
+		if proc, err := os.FindProcess(pid); err == nil && proc != nil {
 			proc.Signal(os.Interrupt)
 		}
-		s.DB.Exec("UPDATE tunnels SET status = 'stopped', pid = 0 WHERE id = ?", id)
 	}
+	s.DB.Exec("UPDATE tunnels SET status = 'stopped', pid = 0 WHERE id = ?", id)
 }
 
 func (s *Service) StopAll() {
+	// NOTE: intentionally in-memory only — DB keeps status='running' as the
+	// desired state so a plain `docker restart` (SIGTERM + start) can respawn
+	// via ReconcileOnBoot. Explicit user stops go through StopTunnel which
+	// persists status='stopped'.
 	s.Processes.Range(func(key, value any) bool {
 		proc := value.(*os.Process)
 		proc.Signal(os.Interrupt)
 		s.Processes.Delete(key)
 		return true
 	})
+}
+
+// isTunnelAlive reports whether a tunnel row has a live cloudflared child.
+// os.FindProcess alone always succeeds on Linux, so we also check the
+// in-memory process table, Signal(0), and /proc/<pid>.
+func (s *Service) isTunnelAlive(t tunnelRow) bool {
+	if t.PID <= 0 {
+		return false
+	}
+	if _, ok := s.Processes.Load(strconv.Itoa(t.ID)); ok {
+		return isPIDAlive(t.PID)
+	}
+	// After a restart the map is empty; fall back to OS-level liveness.
+	// A foreign process could theoretically reuse the pid, so callers
+	// respawn when in doubt — false negatives self-heal, false positives
+	// would wedge the tunnel as "already running".
+	return isPIDAlive(t.PID)
+}
+
+func isPIDAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil || proc == nil {
+		return false
+	}
+	if runtime.GOOS != "windows" {
+		// Signal 0 performs error checking without delivering a signal.
+		// ESRCH => no such process; EPERM => process exists (no permission).
+		if err := proc.Signal(syscall.Signal(0)); err != nil {
+			return false
+		}
+		// Guard against zombies: /proc/<pid>/stat state == Z means dead.
+		if stat, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat")); err == nil {
+			if i := bytes.LastIndexByte(stat, ')'); i >= 0 && i+2 < len(stat) && stat[i+2] == 'Z' {
+				return false
+			}
+		} else if !os.IsPermission(err) {
+			// No /proc entry and no permission issue => process gone
+			// (on systems with /proc; on macOS ReadFile fails differently
+			// but Signal(0) above already validated).
+			if _, err2 := os.Stat(filepath.Join("/proc", strconv.Itoa(pid))); err2 != nil && runtime.GOOS == "linux" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// LiveCounts returns desired (DB status=running) vs actually-alive counts.
+func (s *Service) LiveCounts() (desired, alive, total int) {
+	rows, err := s.DB.Query("SELECT id, status, pid FROM tunnels")
+	if err != nil {
+		return 0, 0, 0
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, pid int
+		var status string
+		if err := rows.Scan(&id, &status, &pid); err != nil {
+			continue
+		}
+		total++
+		if status != "running" {
+			continue
+		}
+		desired++
+		if _, ok := s.Processes.Load(strconv.Itoa(id)); ok && isPIDAlive(pid) {
+			alive++
+		} else if pid > 0 && isPIDAlive(pid) {
+			// Edge: pid alive but not in our map (e.g. adopted). Count it.
+			alive++
+		}
+	}
+	return desired, alive, total
+}
+
+type ReconcileResult struct {
+	Total   int      `json:"total"`
+	Started int      `json:"started"`
+	Skipped int      `json:"skipped"`
+	Failed  []string `json:"failed"`
+	Pruned  int64    `json:"prunedOrphans"`
+}
+
+// PruneOrphanIngressRules deletes ingress_rules referencing deleted tunnels.
+func (s *Service) PruneOrphanIngressRules() (int64, error) {
+	res, err := s.DB.Exec("DELETE FROM ingress_rules WHERE tunnel_id NOT IN (SELECT id FROM tunnels)")
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	if n > 0 {
+		log.Printf("[BOOT] pruned %d orphan ingress_rules", n)
+	}
+	return n, nil
+}
+
+// ReconcileOnBoot respawns cloudflared children for tunnels whose desired
+// state is running+auto_start but which have no live process (e.g. after a
+// plain `docker restart`). It also refreshes stale pid/status rows and prunes
+// orphan ingress rules.
+func (s *Service) ReconcileOnBoot(ctx context.Context) ReconcileResult {
+	var res ReconcileResult
+	pruned, _ := s.PruneOrphanIngressRules()
+	res.Pruned = pruned
+
+	rows, err := s.DB.Query("SELECT id, name, status, pid, COALESCE(auto_start, 1) FROM tunnels")
+	if err != nil {
+		log.Printf("[BOOT] reconcile: query failed: %v", err)
+		return res
+	}
+	defer rows.Close()
+
+	type candidate struct {
+		id        int
+		name      string
+		status    string
+		pid       int
+		autoStart bool
+	}
+	var candidates []candidate
+	for rows.Next() {
+		var c candidate
+		var auto int64
+		if err := rows.Scan(&c.id, &c.name, &c.status, &c.pid, &auto); err != nil {
+			continue
+		}
+		c.autoStart = auto != 0
+		candidates = append(candidates, c)
+	}
+	res.Total = len(candidates)
+
+	for _, c := range candidates {
+		if c.status != "running" || !c.autoStart {
+			// Clear dead pids on rows that should stay stopped.
+			if c.pid != 0 && !isPIDAlive(c.pid) {
+				s.DB.Exec("UPDATE tunnels SET pid = 0 WHERE id = ?", c.id)
+			}
+			res.Skipped++
+			continue
+		}
+		idStr := strconv.Itoa(c.id)
+		if _, ok := s.Processes.Load(idStr); ok && isPIDAlive(c.pid) {
+			res.Skipped++
+			continue
+		}
+		if c.pid > 0 && isPIDAlive(c.pid) {
+			// Adopted live pid (shouldn't normally happen after restart).
+			res.Skipped++
+			continue
+		}
+		// Stale pid row — reset before respawn so retries/observability are clean.
+		s.DB.Exec("UPDATE tunnels SET pid = 0 WHERE id = ?", c.id)
+		s.logTunnel(c.id, "info", "Boot reconcile: respawning missing cloudflared child (post-restart)")
+		startCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+		_, err := s.StartTunnel(startCtx, c.id)
+		cancel()
+		if err != nil {
+			msg := fmt.Sprintf("%s(id=%d): %v", c.name, c.id, err)
+			res.Failed = append(res.Failed, msg)
+			s.logTunnel(c.id, "error", "Boot reconcile failed: "+err.Error())
+			log.Printf("[BOOT] reconcile: start %s failed: %v", msg, err)
+			continue
+		}
+		res.Started++
+		time.Sleep(500 * time.Millisecond)
+	}
+	log.Printf("[BOOT] reconcile done: started %d/%d (skipped=%d failed=%d prunedOrphans=%d)",
+		res.Started, res.Total, res.Skipped, len(res.Failed), res.Pruned)
+	s.logTunnel(nil, "info", fmt.Sprintf("Boot reconcile: started %d/%d tunnels (skipped=%d failed=%d prunedOrphans=%d)",
+		res.Started, res.Total, res.Skipped, len(res.Failed), res.Pruned))
+	return res
+}
+
+// SetAutoStart toggles per-tunnel respawn-on-boot without changing run state.
+func (s *Service) SetAutoStart(id int, enabled bool) error {
+	var exists bool
+	if err := s.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM tunnels WHERE id = ?)", id).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return ErrTunnelNotFound
+	}
+	_, err := s.DB.Exec("UPDATE tunnels SET auto_start = ? WHERE id = ?", boolToInt(enabled), id)
+	if err != nil {
+		return err
+	}
+	state := "disabled"
+	if enabled {
+		state = "enabled"
+	}
+	s.logTunnel(id, "info", "Auto-start "+state)
+	return nil
+}
+
+func autoStartOrDefault(v *bool) bool {
+	if v == nil {
+		return true
+	}
+	return *v
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func (s *Service) logTunnel(tunnelID interface{}, level, msg string) {
