@@ -57,6 +57,9 @@ type Tunnel struct {
 	Status    string    `json:"status"`
 	PID       int       `json:"pid,omitempty"`
 	AutoStart bool      `json:"auto_start"`
+	// ExtraDomains is the number of additional ingress-rule hostnames beyond
+	// the tunnel's primary domain (subdomain.domain).
+	ExtraDomains int `json:"extra_domains"`
 }
 
 type IngressRule struct {
@@ -510,6 +513,7 @@ func main() {
 		log.Fatalf("Failed to init DB: %v", err)
 	}
 	defer db.Close()
+	cleanupRedundantIngressRules()
 
 	// Route standard library logs to both the data-dir file and docker logs.
 	// Previously file-only, which hid boot activity from `docker logs`.
@@ -750,6 +754,8 @@ func initDB() error {
 			path TEXT,
 			service TEXT NOT NULL,
 			protocol TEXT DEFAULT 'http',
+			zone_id TEXT,
+			dns_record_id TEXT,
 			FOREIGN KEY(tunnel_id) REFERENCES tunnels(id) ON DELETE CASCADE
 		);
 		CREATE TABLE IF NOT EXISTS logs (
@@ -795,7 +801,33 @@ func initDB() error {
 		_, _ = db.Exec("ALTER TABLE tunnels ADD COLUMN auto_start INTEGER DEFAULT 1")
 	}
 	_, _ = db.Exec("UPDATE tunnels SET auto_start = 1 WHERE auto_start IS NULL")
+	if _, e := db.Exec("ALTER TABLE ingress_rules ADD COLUMN IF NOT EXISTS zone_id TEXT"); e != nil {
+		_, _ = db.Exec("ALTER TABLE ingress_rules ADD COLUMN zone_id TEXT")
+	}
+	if _, e := db.Exec("ALTER TABLE ingress_rules ADD COLUMN IF NOT EXISTS dns_record_id TEXT"); e != nil {
+		_, _ = db.Exec("ALTER TABLE ingress_rules ADD COLUMN dns_record_id TEXT")
+	}
 	return nil
+}
+
+// cleanupRedundantIngressRules removes ingress rules that merely duplicate a
+// tunnel's base domain (same hostname, empty path and same service as the
+// tunnel address). These were auto-created by an older StartTunnel path and
+// are now represented by the tunnel's primary domain fields instead.
+func cleanupRedundantIngressRules() {
+	res, err := db.Exec(`
+		DELETE FROM ingress_rules
+		WHERE (path IS NULL OR path = '')
+			AND service = (SELECT address FROM tunnels t WHERE t.id = ingress_rules.tunnel_id)
+			AND hostname = (SELECT subdomain || '.' || domain FROM tunnels t WHERE t.id = ingress_rules.tunnel_id)
+	`)
+	if err != nil {
+		log.Printf("[BOOT] redundant ingress cleanup failed: %v", err)
+		return
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		log.Printf("[BOOT] removed %d redundant ingress rule(s) duplicating a tunnel's base domain", n)
+	}
 }
 
 func listTunnels(c *gin.Context) {
@@ -823,7 +855,7 @@ func listTunnels(c *gin.Context) {
 
 	offset := (page - 1) * perPage
 	args = append(args, perPage, offset)
-	rows, err := db.Query("SELECT id, name, uuid, account_id, zone_id, subdomain, domain, COALESCE(address, ''), created_at, status, pid, COALESCE(auto_start, 1) FROM tunnels "+where+" ORDER BY name LIMIT ? OFFSET ?", args...)
+	rows, err := db.Query("SELECT id, name, uuid, account_id, zone_id, subdomain, domain, COALESCE(address, ''), created_at, status, pid, COALESCE(auto_start, 1), (SELECT COUNT(*) FROM ingress_rules ir WHERE ir.tunnel_id = tunnels.id) FROM tunnels "+where+" ORDER BY name LIMIT ? OFFSET ?", args...)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -834,7 +866,7 @@ func listTunnels(c *gin.Context) {
 	for rows.Next() {
 		var t Tunnel
 		var autoStart int64
-		rows.Scan(&t.ID, &t.Name, &t.UUID, &t.AccountID, &t.ZoneID, &t.Subdomain, &t.Domain, &t.Address, &t.CreatedAt, &t.Status, &t.PID, &autoStart)
+		rows.Scan(&t.ID, &t.Name, &t.UUID, &t.AccountID, &t.ZoneID, &t.Subdomain, &t.Domain, &t.Address, &t.CreatedAt, &t.Status, &t.PID, &autoStart, &t.ExtraDomains)
 		t.AutoStart = autoStart != 0
 		tunnels = append(tunnels, t)
 	}
@@ -1119,20 +1151,36 @@ func createIngressRule(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "tunnel_id is required"})
 		return
 	}
-	if strings.TrimSpace(r.Hostname) == "" {
+	r.Hostname = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(r.Hostname, ".")))
+	if r.Hostname == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "hostname is required"})
 		return
 	}
-	if strings.TrimSpace(r.Service) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "service is required"})
+	if err := dnsservice.ValidateHostname(r.Hostname); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid hostname: " + r.Hostname})
 		return
 	}
 
-	var exists bool
-	db.QueryRow("SELECT EXISTS(SELECT 1 FROM tunnels WHERE id = ?)", r.TunnelID).Scan(&exists)
-	if !exists {
+	var address string
+	err := db.QueryRow("SELECT COALESCE(address, '') FROM tunnels WHERE id = ?", r.TunnelID).Scan(&address)
+	if err == sql.ErrNoRows {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "tunnel not found"})
 		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	r.Service = strings.TrimSpace(r.Service)
+	if r.Service == "" {
+		r.Service = strings.TrimSpace(address)
+	}
+	if r.Service == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "service is required (tunnel has no default address)"})
+		return
+	}
+	if strings.TrimSpace(r.Protocol) == "" {
+		r.Protocol = "http"
 	}
 
 	result, err := db.Exec("INSERT INTO ingress_rules (tunnel_id, hostname, path, service, protocol) VALUES (?, ?, ?, ?, ?)",
@@ -1143,32 +1191,114 @@ func createIngressRule(c *gin.Context) {
 	}
 
 	id, _ := result.LastInsertId()
-	c.JSON(http.StatusCreated, gin.H{"id": id})
+	warning, dnsErr := tunnelSvc.EnsureDomainDNS(c.Request.Context(), r.TunnelID, int(id))
+	if dnsErr != nil {
+		log.Printf("[ingress] EnsureDomainDNS failed for tunnel %d rule %d: %v", r.TunnelID, id, dnsErr)
+	}
+	if applyErr := tunnelSvc.ReapplyTunnel(c.Request.Context(), r.TunnelID); applyErr != nil {
+		log.Printf("[ingress] reapply tunnel %d failed: %v", r.TunnelID, applyErr)
+		if warning == "" {
+			warning = "domain saved but connector restart failed: " + applyErr.Error()
+		}
+	}
+	c.JSON(http.StatusCreated, gin.H{"id": id, "dnsWarning": warning})
 }
 
 func updateIngressRule(c *gin.Context) {
 	id := c.Param("id")
+	ruleID, _ := strconv.Atoi(id)
 	var r IngressRule
 	if err := c.ShouldBindJSON(&r); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	r.Hostname = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(r.Hostname, ".")))
+	if r.Hostname == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "hostname is required"})
+		return
+	}
+	if err := dnsservice.ValidateHostname(r.Hostname); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid hostname: " + r.Hostname})
+		return
+	}
 
-	_, err := db.Exec("UPDATE ingress_rules SET hostname = ?, path = ?, service = ?, protocol = ? WHERE id = ?",
-		r.Hostname, r.Path, r.Service, r.Protocol, id)
+	var tunnelID int
+	var oldHostname, address string
+	err := db.QueryRow(`
+		SELECT ir.tunnel_id, COALESCE(ir.hostname, ''), COALESCE(t.address, '')
+		FROM ingress_rules ir JOIN tunnels t ON t.id = ir.tunnel_id
+		WHERE ir.id = ?`, id).Scan(&tunnelID, &oldHostname, &address)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "rule not found"})
+		return
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "Rule updated"})
+
+	r.Service = strings.TrimSpace(r.Service)
+	if r.Service == "" {
+		r.Service = strings.TrimSpace(address)
+	}
+	if r.Service == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "service is required (tunnel has no default address)"})
+		return
+	}
+	if strings.TrimSpace(r.Protocol) == "" {
+		r.Protocol = "http"
+	}
+
+	hostChanged := !strings.EqualFold(strings.ToLower(strings.TrimSpace(strings.TrimSuffix(oldHostname, "."))), r.Hostname)
+	if hostChanged {
+		// Remove the CNAME for the old hostname before it is overwritten.
+		tunnelSvc.DeleteDomainDNS(c.Request.Context(), tunnelID, ruleID)
+		_, err = db.Exec("UPDATE ingress_rules SET hostname = ?, path = ?, service = ?, protocol = ?, zone_id = '', dns_record_id = '' WHERE id = ?",
+			r.Hostname, r.Path, r.Service, r.Protocol, id)
+	} else {
+		_, err = db.Exec("UPDATE ingress_rules SET hostname = ?, path = ?, service = ?, protocol = ? WHERE id = ?",
+			r.Hostname, r.Path, r.Service, r.Protocol, id)
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	warning, dnsErr := tunnelSvc.EnsureDomainDNS(c.Request.Context(), tunnelID, ruleID)
+	if dnsErr != nil {
+		log.Printf("[ingress] EnsureDomainDNS failed for tunnel %d rule %d: %v", tunnelID, ruleID, dnsErr)
+	}
+	if applyErr := tunnelSvc.ReapplyTunnel(c.Request.Context(), tunnelID); applyErr != nil {
+		log.Printf("[ingress] reapply tunnel %d failed: %v", tunnelID, applyErr)
+		if warning == "" {
+			warning = "domain saved but connector restart failed: " + applyErr.Error()
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Rule updated", "dnsWarning": warning})
 }
 
 func deleteIngressRule(c *gin.Context) {
 	id := c.Param("id")
-	_, err := db.Exec("DELETE FROM ingress_rules WHERE id = ?", id)
+	ruleID, _ := strconv.Atoi(id)
+	var tunnelID int
+	err := db.QueryRow("SELECT tunnel_id FROM ingress_rules WHERE id = ?", id).Scan(&tunnelID)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "rule not found"})
+		return
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+
+	// Delete the domain's CNAME before removing the rule row it references.
+	tunnelSvc.DeleteDomainDNS(c.Request.Context(), tunnelID, ruleID)
+	if _, err := db.Exec("DELETE FROM ingress_rules WHERE id = ?", id); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if applyErr := tunnelSvc.ReapplyTunnel(c.Request.Context(), tunnelID); applyErr != nil {
+		log.Printf("[ingress] reapply tunnel %d failed: %v", tunnelID, applyErr)
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "Rule deleted"})
 }

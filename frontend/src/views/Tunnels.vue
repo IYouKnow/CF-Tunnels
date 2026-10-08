@@ -38,6 +38,7 @@
             {{ tunnel.subdomain }}.{{ getDomainName(tunnel.zone_id) }}
           </span>
           <span v-else class="no-domain">-</span>
+          <span v-if="tunnel.extra_domains > 0" class="extra-badge" title="Additional domains">+{{ tunnel.extra_domains }}</span>
         </div>
         <div class="col-address">
           <code v-if="tunnel.address">{{ tunnel.address }}</code>
@@ -55,6 +56,7 @@
             <button class="dropdown-trigger" @click="toggleDropdown(tunnel.id)">⋮</button>
             <div v-if="openDropdown === tunnel.id" class="dropdown-menu" @click="openDropdown = null">
               <button class="dropdown-item" @click="openEditModal(tunnel)">Edit</button>
+              <button class="dropdown-item" @click="openDomains(tunnel)">Domains</button>
               <button v-if="tunnel.status === 'stopped'" class="dropdown-item" @click="promptStart(tunnel.id)">Start</button>
               <button v-else class="dropdown-item" @click="promptStop(tunnel.id)">Stop</button>
               <button class="dropdown-item danger" @click="deleteTunnel(tunnel)">Delete</button>
@@ -154,6 +156,13 @@
       @confirm="doDeleteTunnel"
       @cancel="showDeleteConfirm = false"
     />
+
+    <DomainsModal
+      :show="showDomainsModal"
+      :tunnel="domainsTunnel"
+      @close="showDomainsModal = false"
+      @updated="loadTunnels"
+    />
   </div>
 </template>
 
@@ -164,19 +173,22 @@ import { useRoute } from 'vue-router'
 import api from '../api'
 import { showToast } from '../toast'
 import ConfirmModal from '../components/ConfirmModal.vue'
+import DomainsModal from '../components/DomainsModal.vue'
 import Skeleton from '../components/Skeleton.vue'
 
 let syncedOnce = false
 
 export default {
   name: 'Tunnels',
-  components: { ConfirmModal, Skeleton },
+  components: { ConfirmModal, DomainsModal, Skeleton },
   setup() {
     const tunnels = ref([])
     const domains = ref([])
     const showCreateModal = ref(false)
     const showEditModal = ref(false)
     const editTarget = ref(null)
+    const showDomainsModal = ref(false)
+    const domainsTunnel = ref(null)
     const editName = ref('')
     const editAutoStart = ref(true)
     const newTunnel = ref({ name: '', account_id: '', zone_id: '', subdomain: '', address: '', auto_start: true })
@@ -272,6 +284,11 @@ export default {
       editName.value = tunnel.name
       editAutoStart.value = tunnel.auto_start !== false
       showEditModal.value = true
+    }
+
+    const openDomains = (tunnel) => {
+      domainsTunnel.value = tunnel
+      showDomainsModal.value = true
     }
 
     const saveRename = async () => {
@@ -457,7 +474,10 @@ export default {
       openDropdown,
       toggleDropdown,
       openEditModal,
-      saveRename
+      saveRename,
+      showDomainsModal,
+      domainsTunnel,
+      openDomains
     }
   }
 }
@@ -569,6 +589,16 @@ export default {
 
 .no-domain {
   color: var(--text-secondary);
+}
+
+.extra-badge {
+  font-size: 0.7rem;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  margin-left: 0.4rem;
+  white-space: nowrap;
 }
 
 .manual-badge {

@@ -88,12 +88,14 @@ type tunnelRow struct {
 }
 
 type ingressRule struct {
-	ID       int
-	TunnelID int
-	Hostname string
-	Path     string
-	Service  string
-	Protocol string
+	ID          int
+	TunnelID    int
+	Hostname    string
+	Path        string
+	Service     string
+	Protocol    string
+	ZoneID      string
+	DNSRecordID string
 }
 
 // Service holds tunnel orchestration shared by the dashboard today and
@@ -155,7 +157,17 @@ func (s *Service) CreateTunnel(ctx context.Context, input CreateTunnelInput) (Cr
 		s.logTunnel(id, "info", "Resolved zone apex from Cloudflare API: "+apex)
 	}
 	if tunnelUUID != "" {
-		s.applyTunnelDNS(ctx, int(id), input.ZoneID, input.Subdomain, apex, tunnelUUID, "")
+		host := ""
+		if strings.TrimSpace(input.Subdomain) != "" && strings.TrimSpace(apex) != "" {
+			host = normalizeHostname(input.Subdomain + "." + apex)
+		}
+		if host != "" {
+			if recID, warn := s.ensureCNAMEForHost(ctx, input.ZoneID, host, tunnelUUID, ""); recID != "" {
+				s.DB.Exec("UPDATE tunnels SET dns_record_id = ? WHERE id = ?", recID, id)
+			} else if warn != "" {
+				s.logTunnel(id, "error", warn)
+			}
+		}
 	}
 
 	return CreateTunnelResult{ID: id, Name: input.Name}, nil
@@ -239,34 +251,47 @@ func (s *Service) SyncTunnels(ctx context.Context) (imported int, updated int, e
 		err := s.DB.QueryRow("SELECT id FROM tunnels WHERE uuid = ?", t.ID).Scan(&existingID)
 		if err == sql.ErrNoRows {
 			var zoneID, subdomain, domain, address string
+			type cfHostRule struct{ hostname, service, path string }
+			var extraRules []cfHostRule
 			cfg, cfgErr := s.CF.GetTunnelConfig(ctx, s.DefaultAccountID, t.ID)
 			if cfgErr != nil {
 				log.Printf("[sync] GetTunnelConfig failed for %s (%s): %v", t.Name, t.ID, cfgErr)
 			}
 			if cfgErr == nil && cfg != nil {
+				first := true
 				for _, rule := range cfg.Ingress {
-					if rule.Hostname != "" && rule.Service != "" && !strings.HasPrefix(rule.Service, "http_status:") {
-						hostname := rule.Hostname
+					if rule.Hostname == "" || rule.Service == "" || strings.HasPrefix(rule.Service, "http_status:") {
+						continue
+					}
+					if first {
 						address = rule.Service
-						if zid, dm, sub := matchZoneForHostname(hostname, zoneMap); zid != "" {
+						if zid, dm, sub := matchZoneForHostname(rule.Hostname, zoneMap); zid != "" {
 							zoneID = zid
 							domain = dm
 							subdomain = sub
 						} else {
-							domain = hostname
+							domain = rule.Hostname
 						}
-						break
+						first = false
+						continue
 					}
+					extraRules = append(extraRules, cfHostRule{hostname: rule.Hostname, service: rule.Service, path: rule.Path})
 				}
 			}
 
-			_, insertErr := s.DB.Exec(
+			res, insertErr := s.DB.Exec(
 				"INSERT INTO tunnels (name, uuid, account_id, zone_id, subdomain, domain, address, status, auto_start, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
 				t.Name, t.ID, t.AccountID, zoneID, subdomain, domain, address, cfStatus, t.CreatedAt,
 			)
 			if insertErr != nil {
 				log.Printf("[sync] Failed to import tunnel %q: %v", t.Name, insertErr)
 				continue
+			}
+			if newID, idErr := res.LastInsertId(); idErr == nil {
+				for _, er := range extraRules {
+					s.DB.Exec("INSERT INTO ingress_rules (tunnel_id, hostname, path, service, protocol) VALUES (?, ?, ?, ?, 'http')",
+						newID, er.hostname, er.path, er.service)
+				}
 			}
 			imported++
 			s.logTunnel(t.Name, "info", "Imported from Cloudflare")
@@ -370,26 +395,14 @@ func (s *Service) StartTunnel(ctx context.Context, id int) (StartTunnelResult, e
 	}
 
 	log.Printf("[DNS] ZoneID=%s Subdomain=%s Apex=%s APIToken=%v", t.ZoneID, t.Subdomain, apex, s.HasAPIToken)
-	s.applyTunnelDNS(ctx, id, t.ZoneID, t.Subdomain, apex, t.UUID, t.DNSRecordID)
+	s.syncDomainDNS(ctx, id, t, apex)
 
-	ingressRules, _ := s.getIngressRulesForTunnel(id)
-	if t.Address != "" && len(ingressRules) == 0 {
-		hostname := ""
-		if t.Subdomain != "" && apex != "" {
-			hostname = t.Subdomain + "." + apex
+	ingressRules := s.buildIngressRules(id, t, apex)
+	if len(ingressRules) == 0 {
+		if strings.TrimSpace(t.Address) == "" {
+			return StartTunnelResult{}, &BadRequestError{Message: "No address specified and no ingress rules configured"}
 		}
-		_, err := s.DB.Exec("INSERT INTO ingress_rules (tunnel_id, hostname, path, service, protocol) VALUES (?, ?, ?, ?, ?)",
-			id, hostname, "", t.Address, "http")
-		if err != nil {
-			s.logTunnel(id, "error", "Failed to create ingress rule: "+err.Error())
-		} else {
-			ingressRules, _ = s.getIngressRulesForTunnel(id)
-			s.logTunnel(id, "info", "Created ingress rule for: "+t.Address)
-		}
-	}
-
-	if len(ingressRules) == 0 && t.Address == "" {
-		return StartTunnelResult{}, &BadRequestError{Message: "No address specified and no ingress rules configured"}
+		return StartTunnelResult{}, &BadRequestError{Message: "No domain configured — set a subdomain/domain or add a domain"}
 	}
 
 	acc := t.AccountID
@@ -509,6 +522,25 @@ func (s *Service) DeleteTunnel(ctx context.Context, id string) (DeleteTunnelResu
 		}
 	}
 
+	// Additional domains: remove their CNAMEs as well (before the tunnel row is
+	// deleted, otherwise the FK cascade would drop the rules first).
+	if s.HasAPIToken {
+		if tunnelID, convErr := strconv.Atoi(id); convErr == nil {
+			baseFQDN := ""
+			if strings.TrimSpace(t.Subdomain) != "" && strings.TrimSpace(t.Domain) != "" {
+				baseFQDN = normalizeHostname(t.Subdomain + "." + t.Domain)
+			}
+			rules, _ := s.getIngressRulesForTunnel(tunnelID)
+			for _, r := range rules {
+				host := normalizeHostname(r.Hostname)
+				if host == "" || (baseFQDN != "" && host == baseFQDN) {
+					continue
+				}
+				s.deleteHostDNS(ctx, tunnelID, r.ZoneID, host, r.DNSRecordID)
+			}
+		}
+	}
+
 	if t.UUID != "" && s.HasAPIToken {
 		accID := t.AccountID
 		if accID == "" {
@@ -561,7 +593,7 @@ func (s *Service) loadTunnelForStart(id int) (tunnelRow, error) {
 }
 
 func (s *Service) getIngressRulesForTunnel(tunnelID int) ([]ingressRule, error) {
-	rows, err := s.DB.Query("SELECT id, tunnel_id, hostname, path, service, protocol FROM ingress_rules WHERE tunnel_id = ?", tunnelID)
+	rows, err := s.DB.Query("SELECT id, tunnel_id, hostname, path, service, protocol, COALESCE(zone_id, ''), COALESCE(dns_record_id, '') FROM ingress_rules WHERE tunnel_id = ?", tunnelID)
 	if err != nil {
 		return nil, err
 	}
@@ -570,7 +602,7 @@ func (s *Service) getIngressRulesForTunnel(tunnelID int) ([]ingressRule, error) 
 	var rules []ingressRule
 	for rows.Next() {
 		var r ingressRule
-		rows.Scan(&r.ID, &r.TunnelID, &r.Hostname, &r.Path, &r.Service, &r.Protocol)
+		rows.Scan(&r.ID, &r.TunnelID, &r.Hostname, &r.Path, &r.Service, &r.Protocol, &r.ZoneID, &r.DNSRecordID)
 		rules = append(rules, r)
 	}
 	return rules, nil
@@ -594,69 +626,248 @@ func (s *Service) resolveZoneApex(ctx context.Context, zoneID string, domainStor
 	return name, true, nil
 }
 
-func (s *Service) applyTunnelDNS(ctx context.Context, id int, zoneID, subdomain, apex, tunnelUUID, existingDNSID string) {
-	if zoneID == "" || subdomain == "" || apex == "" || !s.HasAPIToken || tunnelUUID == "" {
-		s.logTunnel(id, "info", "Skipping DNS - need zone_id, subdomain, apex, tunnel UUID, and API token")
-		return
+func normalizeHostname(h string) string {
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(h), "."))
+}
+
+// baseHostname returns the tunnel's primary FQDN (subdomain.apex), lowercased.
+func baseHostname(t tunnelRow, apex string) string {
+	sub := strings.TrimSpace(t.Subdomain)
+	ap := strings.TrimSpace(apex)
+	if sub == "" || ap == "" {
+		return ""
 	}
-	fullDomain := subdomain + "." + apex
+	return normalizeHostname(sub + "." + ap)
+}
+
+// buildIngressRules assembles the full ingress set for a tunnel: the primary
+// domain (synthesized in-memory, always pointing at the tunnel address) plus
+// every additional domain stored in ingress_rules. Rules that merely duplicate
+// the primary domain are skipped so the primary is never emitted twice.
+func (s *Service) buildIngressRules(id int, t tunnelRow, apex string) []ingressRule {
+	rules, _ := s.getIngressRulesForTunnel(id)
+	primary := baseHostname(t, apex)
+	out := make([]ingressRule, 0, len(rules)+1)
+	if primary != "" && strings.TrimSpace(t.Address) != "" {
+		out = append(out, ingressRule{Hostname: primary, Service: t.Address, Protocol: "http"})
+	}
+	for _, r := range rules {
+		if primary != "" && strings.EqualFold(normalizeHostname(r.Hostname), primary) && strings.TrimSpace(r.Path) == "" {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// resolveZoneForHostname finds the Cloudflare zone that owns a hostname by
+// walking its parent suffixes (e.g. app.example.com -> example.com).
+func (s *Service) resolveZoneForHostname(ctx context.Context, hostname string) (zoneID, apex string, err error) {
+	host := normalizeHostname(hostname)
+	if host == "" || !s.HasAPIToken {
+		return "", "", nil
+	}
+	parts := strings.Split(host, ".")
+	for i := 0; i < len(parts)-1; i++ {
+		candidate := strings.Join(parts[i:], ".")
+		if !strings.Contains(candidate, ".") {
+			continue
+		}
+		zone, zErr := s.CF.FindZoneByName(ctx, candidate)
+		if zErr != nil {
+			return "", "", zErr
+		}
+		if zone != nil {
+			return zone.ID, zone.Name, nil
+		}
+	}
+	return "", "", nil
+}
+
+// ensureCNAMEForHost creates (or adopts) a proxied CNAME <hostname> ->
+// <uuid>.cfargotunnel.com, returning the record ID and a non-fatal warning.
+func (s *Service) ensureCNAMEForHost(ctx context.Context, zoneID, hostname, tunnelUUID, existingDNSID string) (string, string) {
+	host := normalizeHostname(hostname)
+	if zoneID == "" || host == "" || !s.HasAPIToken || tunnelUUID == "" {
+		return "", ""
+	}
 	expectedContent := tunnelUUID + ".cfargotunnel.com"
 	if strings.TrimSpace(existingDNSID) != "" {
 		// Validate the stored record instead of blindly trusting it (RCA:
 		// manual delete/recreate left dns_record_id mismatched).
-		records, err := s.CF.FindDNSRecords(ctx, zoneID, fullDomain, "CNAME")
+		records, err := s.CF.FindDNSRecords(ctx, zoneID, host, "CNAME")
 		if err != nil {
-			s.logTunnel(id, "error", "DNS validation lookup failed, keeping stored record: "+err.Error())
-			log.Printf("[DNS] validation lookup failed for %s: %v", fullDomain, err)
-			return
+			log.Printf("[DNS] validation lookup failed for %s: %v", host, err)
+			return strings.TrimSpace(existingDNSID), "DNS validation lookup failed: " + err.Error()
 		}
 		for _, r := range records {
 			if r.ID == strings.TrimSpace(existingDNSID) && strings.EqualFold(strings.TrimSuffix(r.Content, "."), expectedContent) {
-				s.logTunnel(id, "info", "DNS record already present, skipping creation")
-				return
+				return r.ID, ""
 			}
 		}
-		s.logTunnel(id, "info", "Stored DNS record missing/mismatched vs Cloudflare, recreating CNAME")
-		log.Printf("[DNS] stored record %s missing/mismatched for %s, recreating", existingDNSID, fullDomain)
+		log.Printf("[DNS] stored record %s missing/mismatched for %s, recreating", existingDNSID, host)
 	}
-	log.Printf("[DNS] Creating CNAME: %s -> %s.cfargotunnel.com", fullDomain, tunnelUUID)
+	log.Printf("[DNS] Creating CNAME: %s -> %s", host, expectedContent)
 	proxied := true
 	record, err := s.CF.CreateDNSRecord(ctx, zoneID, cloudflare.DNSRecordInput{
 		Type:    "CNAME",
-		Name:    fullDomain,
-		Content: tunnelUUID + ".cfargotunnel.com",
+		Name:    host,
+		Content: expectedContent,
 		Proxied: &proxied,
 	})
 	if err != nil {
-		// The record may already exist in Cloudflare while our DB has no
-		// (or a stale) dns_record_id — e.g. local dev DB against the real
-		// CF account. Adopt the existing record instead of erroring every boot.
+		// The record may already exist in Cloudflare while our DB has no (or a
+		// stale) dns_record_id — adopt the existing record instead of failing.
 		if strings.Contains(strings.ToLower(err.Error()), "already exists") {
-			if existing, findErr := s.CF.FindDNSRecord(ctx, zoneID, fullDomain, "CNAME"); findErr == nil && existing != nil {
-				s.DB.Exec("UPDATE tunnels SET dns_record_id = ? WHERE id = ?", existing.ID, id)
+			if existing, findErr := s.CF.FindDNSRecord(ctx, zoneID, host, "CNAME"); findErr == nil && existing != nil {
 				if strings.EqualFold(strings.TrimSuffix(existing.Content, "."), expectedContent) {
-					s.logTunnel(id, "info", "Adopted existing DNS CNAME record: "+fullDomain)
-					log.Printf("[DNS] Adopted existing record %s for %s", existing.ID, fullDomain)
-				} else {
-					s.logTunnel(id, "error", fmt.Sprintf("DNS CNAME %s points to %q, expected %q — fix manually in Cloudflare",
-						fullDomain, existing.Content, expectedContent))
-					log.Printf("[DNS] WARNING: %s points to %q, expected %q", fullDomain, existing.Content, expectedContent)
+					log.Printf("[DNS] Adopted existing record %s for %s", existing.ID, host)
+					return existing.ID, ""
 				}
-				return
+				return existing.ID, fmt.Sprintf("DNS CNAME %s points to %q, expected %q — fix manually in Cloudflare", host, existing.Content, expectedContent)
 			}
 		}
 		log.Printf("[DNS] ERROR: %v", err)
-		s.logTunnel(id, "error", "DNS CNAME failed: "+err.Error())
-		return
+		return "", "DNS CNAME failed for " + host + ": " + err.Error()
 	}
 	if record.ID != "" {
-		s.DB.Exec("UPDATE tunnels SET dns_record_id = ? WHERE id = ?", record.ID, id)
-		s.logTunnel(id, "info", "DNS CNAME record created: "+fullDomain+" -> "+tunnelUUID+".cfargotunnel.com")
-		log.Printf("[DNS] Created record ID: %s", record.ID)
+		log.Printf("[DNS] Created record ID %s for %s", record.ID, host)
+		return record.ID, ""
+	}
+	return "", "DNS CNAME returned empty record ID for " + host
+}
+
+// syncDomainDNS ensures a proxied CNAME exists for the tunnel's primary domain
+// and for every additional ingress-rule hostname.
+func (s *Service) syncDomainDNS(ctx context.Context, id int, t tunnelRow, apex string) {
+	if !s.HasAPIToken || t.UUID == "" {
 		return
 	}
-	log.Printf("[DNS] Empty recordID returned")
-	s.logTunnel(id, "error", "DNS CNAME returned empty recordID")
+	primary := baseHostname(t, apex)
+	if primary != "" {
+		recID, warn := s.ensureCNAMEForHost(ctx, t.ZoneID, primary, t.UUID, t.DNSRecordID)
+		if warn != "" {
+			s.logTunnel(id, "error", warn)
+		}
+		if recID != "" && recID != strings.TrimSpace(t.DNSRecordID) {
+			s.DB.Exec("UPDATE tunnels SET dns_record_id = ? WHERE id = ?", recID, id)
+		}
+	}
+	rules, _ := s.getIngressRulesForTunnel(id)
+	for _, r := range rules {
+		host := normalizeHostname(r.Hostname)
+		if host == "" || (primary != "" && strings.EqualFold(host, primary)) {
+			continue
+		}
+		zoneID := strings.TrimSpace(r.ZoneID)
+		if zoneID == "" {
+			if zid, _, zErr := s.resolveZoneForHostname(ctx, host); zErr == nil {
+				zoneID = zid
+			}
+		}
+		if zoneID == "" {
+			continue
+		}
+		recID, warn := s.ensureCNAMEForHost(ctx, zoneID, host, t.UUID, r.DNSRecordID)
+		if warn != "" {
+			s.logTunnel(id, "error", warn)
+		}
+		if recID != "" {
+			s.DB.Exec("UPDATE ingress_rules SET zone_id = ?, dns_record_id = ? WHERE id = ?", zoneID, recID, r.ID)
+		}
+	}
+}
+
+// EnsureDomainDNS creates/adopts the proxied CNAME for an ingress rule's
+// hostname and persists the resolved zone + record ID on the rule. A non-nil
+// warning describes a non-fatal DNS problem (the domain is still saved).
+func (s *Service) EnsureDomainDNS(ctx context.Context, tunnelID, ruleID int) (string, error) {
+	var hostname, zoneID, existing string
+	err := s.DB.QueryRow("SELECT COALESCE(hostname,''), COALESCE(zone_id,''), COALESCE(dns_record_id,'') FROM ingress_rules WHERE id = ? AND tunnel_id = ?", ruleID, tunnelID).
+		Scan(&hostname, &zoneID, &existing)
+	if err != nil {
+		return "", err
+	}
+	var uuid string
+	if err := s.DB.QueryRow("SELECT COALESCE(uuid,'') FROM tunnels WHERE id = ?", tunnelID).Scan(&uuid); err != nil {
+		return "", err
+	}
+	host := normalizeHostname(hostname)
+	if host == "" || uuid == "" || !s.HasAPIToken {
+		return "", nil
+	}
+	if strings.TrimSpace(zoneID) == "" {
+		zid, _, zErr := s.resolveZoneForHostname(ctx, host)
+		if zErr != nil {
+			return "could not resolve Cloudflare zone for " + host + ": " + zErr.Error(), nil
+		}
+		zoneID = zid
+	}
+	if zoneID == "" {
+		return "no Cloudflare zone found for " + host + " — DNS record not created", nil
+	}
+	recID, warn := s.ensureCNAMEForHost(ctx, zoneID, host, uuid, existing)
+	if recID != "" {
+		s.DB.Exec("UPDATE ingress_rules SET zone_id = ?, dns_record_id = ? WHERE id = ?", zoneID, recID, ruleID)
+	}
+	return warn, nil
+}
+
+// DeleteDomainDNS removes the CNAME associated with an ingress rule.
+func (s *Service) DeleteDomainDNS(ctx context.Context, tunnelID, ruleID int) {
+	if !s.HasAPIToken {
+		return
+	}
+	var hostname, zoneID, recID string
+	err := s.DB.QueryRow("SELECT COALESCE(hostname,''), COALESCE(zone_id,''), COALESCE(dns_record_id,'') FROM ingress_rules WHERE id = ? AND tunnel_id = ?", ruleID, tunnelID).
+		Scan(&hostname, &zoneID, &recID)
+	if err != nil {
+		return
+	}
+	s.deleteHostDNS(ctx, tunnelID, zoneID, hostname, recID)
+}
+
+func (s *Service) deleteHostDNS(ctx context.Context, tunnelID int, zoneID, hostname, recordID string) {
+	host := normalizeHostname(hostname)
+	if host == "" || !s.HasAPIToken {
+		return
+	}
+	if strings.TrimSpace(zoneID) == "" {
+		if zid, _, err := s.resolveZoneForHostname(ctx, host); err == nil {
+			zoneID = zid
+		}
+	}
+	if zoneID == "" {
+		return
+	}
+	if strings.TrimSpace(recordID) == "" {
+		if id, err := s.CF.FindCNAMERecordID(ctx, zoneID, host); err == nil {
+			recordID = id
+		}
+	}
+	if strings.TrimSpace(recordID) == "" {
+		return
+	}
+	if err := s.CF.DeleteDNSRecord(ctx, zoneID, recordID); err != nil {
+		s.logTunnel(tunnelID, "error", "DNS delete failed for "+host+": "+err.Error())
+	}
+}
+
+// ReapplyTunnel restarts the tunnel's cloudflared connector so domain changes
+// take effect immediately (StartTunnel re-pushes ingress + ensures DNS). It is
+// a no-op when the tunnel is not currently running — the change applies on the
+// next start.
+func (s *Service) ReapplyTunnel(ctx context.Context, id int) error {
+	t, err := s.loadTunnelForStart(id)
+	if err != nil {
+		return err
+	}
+	if t.Status != "running" || !s.isTunnelAlive(t) {
+		return nil
+	}
+	s.stopTunnelProcess(strconv.Itoa(id))
+	_, err = s.StartTunnel(ctx, id)
+	return err
 }
 
 func (s *Service) stopTunnelProcess(id string) {

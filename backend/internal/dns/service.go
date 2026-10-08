@@ -66,6 +66,12 @@ func validateHostname(hostname string) error {
 	return nil
 }
 
+// ValidateHostname exposes FQDN validation to other packages (e.g. tunnel
+// ingress handlers) so hostnames are validated consistently everywhere.
+func ValidateHostname(hostname string) error {
+	return validateHostname(normalizeHostname(hostname))
+}
+
 func normalizeType(recordType string) string {
 	recordType = strings.ToUpper(strings.TrimSpace(recordType))
 	if recordType == "" {
