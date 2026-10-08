@@ -332,15 +332,10 @@ func (s *Service) StartTunnel(ctx context.Context, id int) (StartTunnelResult, e
 	}
 	// Stale row (status=running but no live process, e.g. after `docker restart`):
 	// fall through and respawn instead of returning "already running".
-
-	if t.Address != "" {
-		var conflictID int
-		var conflictName string
-		err := s.DB.QueryRow("SELECT id, name FROM tunnels WHERE address = ? AND status = 'running' AND id != ?", t.Address, id).Scan(&conflictID, &conflictName)
-		if err == nil {
-			return StartTunnelResult{}, &BadRequestError{Message: fmt.Sprintf("Cannot start — address %q is already in use by tunnel %q", t.Address, conflictName)}
-		}
-	}
+	//
+	// NOTE: multiple tunnels may legitimately share one destination address
+	// (each has its own UUID, CNAME and connector), so no address-uniqueness
+	// check is enforced here.
 
 	if t.UUID == "" {
 		acc := t.AccountID
