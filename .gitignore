@@ -30,7 +30,6 @@ node_modules/
 .pnpm-store/
 frontend/node_modules/
 frontend/dist/
-backend/frontend/dist/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
@@ -39,8 +38,16 @@ pnpm-debug.log*
 # Vite
 frontend/.vite/
 
-# --- SQLite (runtime DB; paths match backend defaults) ---
-tunnels.db
+# Runtime data
+backend/data/
+
+# Runtime binaries
+backend/bin/
+
+# --- SQLite (runtime DB) ---
+*.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 
@@ -62,4 +69,3 @@ docker-compose.override.yml
 
 # --- IDE (JetBrains) ---
 .idea/
-backend/tunnels.db-journal

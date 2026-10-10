@@ -69,6 +69,9 @@ type Service struct {
 	Processes        *sync.Map
 	LogTunnel        func(tunnelID interface{}, level, msg string)
 	NewLogWriter     func(id string, level string) io.Writer
+	// BinDir is where the cloudflared connector executable is looked up first
+	// (mirrors the Docker /app/bin layout; "bin" for local dev).
+	BinDir string
 }
 
 type tunnelRow struct {
@@ -101,7 +104,7 @@ type ingressRule struct {
 // Service holds tunnel orchestration shared by the dashboard today and
 // reusable later by an internal app-to-app API, dynamic DNS flows, and
 // app-owned tunnel provisioning without duplicating handler logic.
-func NewService(db *sql.DB, cf *cloudflare.Client, defaultAccountID string, hasAPIToken bool, processes *sync.Map, logTunnel func(tunnelID interface{}, level, msg string), newLogWriter func(id string, level string) io.Writer) *Service {
+func NewService(db *sql.DB, cf *cloudflare.Client, defaultAccountID string, hasAPIToken bool, processes *sync.Map, logTunnel func(tunnelID interface{}, level, msg string), newLogWriter func(id string, level string) io.Writer, binDir string) *Service {
 	return &Service{
 		DB:               db,
 		CF:               cf,
@@ -110,6 +113,7 @@ func NewService(db *sql.DB, cf *cloudflare.Client, defaultAccountID string, hasA
 		Processes:        processes,
 		LogTunnel:        logTunnel,
 		NewLogWriter:     newLogWriter,
+		BinDir:           binDir,
 	}
 }
 
@@ -421,16 +425,7 @@ func (s *Service) StartTunnel(ctx context.Context, id int) (StartTunnelResult, e
 		s.logTunnel(id, "info", "Pushed ingress configuration to Cloudflare")
 	}
 
-	exeDir, _ := filepath.Abs(".")
-	binName := "cloudflared"
-	if runtime.GOOS == "windows" {
-		binName = "cloudflared.exe"
-	}
-	cloudflaredPath := filepath.Join(exeDir, binName)
-	if _, err := os.Stat(cloudflaredPath); err != nil {
-		cloudflaredPath = binName
-		exeDir = "."
-	}
+	cloudflaredPath := s.resolveCloudflaredPath()
 
 	s.logTunnel(id, "info", fmt.Sprintf("Starting tunnel with: %s", cloudflaredPath))
 
@@ -443,7 +438,6 @@ func (s *Service) StartTunnel(ctx context.Context, id int) (StartTunnelResult, e
 		s.logTunnel(id, "info", "Generated config: "+configFile)
 		cmd = exec.Command(cloudflaredPath, "tunnel", "--config", configFile, "run", t.UUID)
 	}
-	cmd.Dir = exeDir
 	cmd.Stdout = s.NewLogWriter(idStr, "info")
 	cmd.Stderr = s.NewLogWriter(idStr, "error")
 
@@ -1211,17 +1205,26 @@ func originServiceURLForIngress(service string) string {
 	}
 }
 
-func resolveCloudflaredPath() string {
-	exeDir, _ := filepath.Abs(".")
+// resolveCloudflaredPath locates the cloudflared connector executable: the
+// configured bin dir first, then the working directory, then PATH.
+func (s *Service) resolveCloudflaredPath() string {
 	binName := "cloudflared"
 	if runtime.GOOS == "windows" {
 		binName = "cloudflared.exe"
 	}
-	path := filepath.Join(exeDir, binName)
-	if _, err := os.Stat(path); err != nil {
-		path = binName
+	var candidates []string
+	if strings.TrimSpace(s.BinDir) != "" {
+		candidates = append(candidates, filepath.Join(s.BinDir, binName))
 	}
-	return path
+	if exeDir, err := filepath.Abs("."); err == nil {
+		candidates = append(candidates, filepath.Join(exeDir, binName))
+	}
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return binName
 }
 
 type VersionInfo struct {
@@ -1237,7 +1240,7 @@ type UpdateInfo struct {
 }
 
 func (s *Service) GetCloudflaredVersion(ctx context.Context) (*VersionInfo, error) {
-	path := resolveCloudflaredPath()
+	path := s.resolveCloudflaredPath()
 	cmd := exec.CommandContext(ctx, path, "version")
 	out, err := cmd.Output()
 	if err != nil {
@@ -1285,7 +1288,7 @@ func (s *Service) CheckCloudflaredUpdate(ctx context.Context) (*UpdateInfo, erro
 }
 
 func (s *Service) UpdateCloudflared(ctx context.Context) (string, error) {
-	path := resolveCloudflaredPath()
+	path := s.resolveCloudflaredPath()
 	cmd := exec.CommandContext(ctx, path, "update")
 	out, err := cmd.CombinedOutput()
 	msg := strings.TrimSpace(string(out))

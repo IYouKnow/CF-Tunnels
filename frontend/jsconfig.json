@@ -1,6 +1,5 @@
 {
   "compilerOptions": {
-    "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"]
     },
@@ -10,6 +9,7 @@
     "lib": ["esnext", "dom"],
     "target": "esnext",
     "checkJs": true,
+    "noEmit": true,
     "skipLibCheck": true,
     "allowSyntheticDefaultImports": true,
     "esModuleInterop": true,

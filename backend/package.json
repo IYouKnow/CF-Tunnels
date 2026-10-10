@@ -3,6 +3,6 @@
   "private": true,
   "scripts": {
     "dev": "go run main.go",
-    "build": "go build"
+    "build": "go build -o bin/cf-tunnels.exe ."
   }
 }

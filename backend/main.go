@@ -436,10 +436,20 @@ func validateAccountIDForTunnelAPI(accountID string) string {
 }
 
 func dataDir() string {
+	if v := strings.TrimSpace(os.Getenv("DATA_DIR")); v != "" {
+		return v
+	}
 	if _, err := os.Stat("/app/data"); err == nil {
 		return "/app/data"
 	}
-	return "."
+	return "data"
+}
+
+func binDir() string {
+	if _, err := os.Stat("/app/bin"); err == nil {
+		return "/app/bin"
+	}
+	return "bin"
 }
 
 func webRootDir() string {
@@ -527,7 +537,7 @@ func main() {
 	}
 	appSvc = apps.NewService(db)
 	dnsSvc = dnsservice.NewService(cfClient)
-	tunnelSvc = tunnels.NewService(db, cfClient, cfg.AccountID, cfg.APIToken != "", &tunnelProcs, logTunnel, newTunnelLogWriter)
+	tunnelSvc = tunnels.NewService(db, cfClient, cfg.AccountID, cfg.APIToken != "", &tunnelProcs, logTunnel, newTunnelLogWriter, binDir())
 
 	// Boot reconcile (RCA 2026-09-27): respawn cloudflared children for
 	// tunnels whose desired state is running+auto_start. Runs async so slow
