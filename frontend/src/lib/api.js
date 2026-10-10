@@ -5,6 +5,11 @@
 
 import { request, API_BASE } from "./http";
 
+// Some Go handlers return a bare slice that marshals to JSON `null` when empty
+// (e.g. /api/ingress, /api/logs); normalize those to an array so callers can
+// always map over the result.
+const asArray = (v) => (Array.isArray(v) ? v : []);
+
 function normalizeTunnel(t, zonesById) {
   const zoneName = t.zone_id != null ? zonesById[t.zone_id] ?? null : null;
   return {
@@ -39,7 +44,7 @@ function normalizeRecord(r) {
 async function fetchZonesById() {
   try {
     const data = await request("/api/domains", { query: { per_page: 200 } });
-    return Object.fromEntries((data.domains || []).map((z) => [z.id, z.name]));
+    return Object.fromEntries(asArray(data?.domains).map((z) => [z.id, z.name]));
   } catch {
     return {};
   }
@@ -60,7 +65,7 @@ export const api = {
         request("/api/tunnels", { query: { per_page: 200 } }),
         fetchZonesById(),
       ]);
-      return (list.tunnels || []).map((t) => normalizeTunnel(t, zonesById));
+      return asArray(list?.tunnels).map((t) => normalizeTunnel(t, zonesById));
     },
     get: (id) => request(`/api/tunnels/${id}`),
     create: (body) => request("/api/tunnels", { method: "POST", body }),
@@ -72,7 +77,7 @@ export const api = {
   },
 
   ingress: {
-    list: (tunnelId) => request("/api/ingress", { query: { tunnel_id: tunnelId } }),
+    list: async (tunnelId) => asArray(await request("/api/ingress", { query: { tunnel_id: tunnelId } })),
     create: (body) => request("/api/ingress", { method: "POST", body }),
     update: (id, body) => request(`/api/ingress/${id}`, { method: "PUT", body }),
     remove: (id) => request(`/api/ingress/${id}`, { method: "DELETE" }),
@@ -81,13 +86,13 @@ export const api = {
   dns: {
     zones: async () => {
       const data = await request("/api/domains", { query: { per_page: 200 } });
-      return (data.domains || []).map((z) => ({ id: z.id, name: z.name }));
+      return asArray(data?.domains).map((z) => ({ id: z.id, name: z.name }));
     },
     async records(zoneId, { page = 1, perPage = 200 } = {}) {
       const data = await request("/api/dns/records", {
         query: { zone_id: zoneId, page, per_page: perPage },
       });
-      return { records: (data.records || []).map(normalizeRecord), total: data.total || 0 };
+      return { records: asArray(data?.records).map(normalizeRecord), total: data?.total || 0 };
     },
     create: (body) => request("/api/dns", { method: "POST", body }),
     update: (zoneId, recordId, body) => request(`/api/dns/${zoneId}/${recordId}`, { method: "PUT", body }),
@@ -105,7 +110,7 @@ export const api = {
   logs: {
     async list(limit = 500) {
       const data = await request("/api/logs", { query: { limit } });
-      return (Array.isArray(data) ? data : []).map((l) => ({
+      return asArray(data).map((l) => ({
         id: l.id,
         tunnelId: l.tunnel_id,
         timestamp: l.timestamp,
@@ -120,11 +125,11 @@ export const api = {
   },
 
   apps: {
-    list: () => request("/api/apps"),
+    list: async () => asArray(await request("/api/apps")),
     get: (id) => request(`/api/apps/${id}`),
     create: (body) => request("/api/apps", { method: "POST", body }),
     remove: (id) => request(`/api/apps/${id}`, { method: "DELETE" }),
-    tokens: (id) => request(`/api/apps/${id}/tokens`),
+    tokens: async (id) => asArray(await request(`/api/apps/${id}/tokens`)),
     createToken: (id, body) => request(`/api/apps/${id}/tokens`, { method: "POST", body }),
     revokeToken: (id, tokenId) => request(`/api/apps/${id}/tokens/${tokenId}`, { method: "DELETE" }),
     purgeToken: (id, tokenId) =>

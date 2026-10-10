@@ -1,15 +1,7 @@
-// Thin fetch wrapper around the Go/Gin backend.
-//
-// In dev the Vite server proxies /api -> :38427 (see vite.config.js). When the
-// SPA is served by the Go server itself it is same-origin. If someone opens the
-// dev server on a non-standard host we fall back to hitting the API port
-// directly, mirroring the previous Vue client's behaviour.
-const inferredDevBase =
-  typeof window !== "undefined" && window.location.port && window.location.port !== "38427"
-    ? `${window.location.protocol}//${window.location.hostname}:38427`
-    : "";
-
-export const API_BASE = import.meta.env.VITE_API_BASE_URL || inferredDevBase;
+// The SPA talks to the Go API same-origin: in production the Go server serves
+// both, and in dev the Vite server proxies /api -> :38427 (see vite.config.js).
+// Override with VITE_API_BASE_URL only if you serve the API from elsewhere.
+export const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
 export class ApiError extends Error {
   constructor(message, status, data) {
