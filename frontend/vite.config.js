@@ -1,8 +1,14 @@
 import { defineConfig } from 'vite'
-import vue from '@vitejs/plugin-vue'
+import react from '@vitejs/plugin-react'
+import { fileURLToPath, URL } from 'node:url'
 
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [react()],
+  resolve: {
+    alias: {
+      '@': fileURLToPath(new URL('./src', import.meta.url)),
+    },
+  },
   server: {
     port: 8080,
     host: '0.0.0.0',
@@ -10,12 +16,8 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:38427',
         changeOrigin: true,
-        cookieDomainRewrite: ''
-      }
-    }
+        cookieDomainRewrite: '',
+      },
+    },
   },
-  build: {
-    outDir: '../frontend/dist',
-    emptyOutDir: true
-  }
 })
